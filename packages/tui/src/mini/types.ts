@@ -22,6 +22,7 @@ import type {
   SessionMessageAssistantTool,
 } from "@opencode/client/promise"
 import type { Config } from "../config"
+import type { TodoStatus } from "../util/todo"
 import type { CliRenderer } from "@opentui/core"
 import type { SessionInbox } from "@opencode/schema/session-inbox"
 
@@ -222,6 +223,16 @@ type ToolTaskSnapshot = {
   tail: string
 }
 
+type ToolTodoSnapshot = {
+  kind: "todo"
+  items: Array<{
+    content: string
+    status: TodoStatus
+    mark: string
+  }>
+  tail: string
+}
+
 type ToolQuestionSnapshot = {
   kind: "question"
   items: Array<{
@@ -231,7 +242,12 @@ type ToolQuestionSnapshot = {
   tail: string
 }
 
-export type ToolSnapshot = ToolCodeSnapshot | ToolDiffSnapshot | ToolTaskSnapshot | ToolQuestionSnapshot
+export type ToolSnapshot =
+  | ToolCodeSnapshot
+  | ToolDiffSnapshot
+  | ToolTaskSnapshot
+  | ToolTodoSnapshot
+  | ToolQuestionSnapshot
 
 type MiniToolState =
   | {

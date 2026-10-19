@@ -410,6 +410,25 @@ interval and 30-minute active window.
 See the [warming guide](/warming) for request behavior, customization,
 and cost considerations.
 
+### Todos
+
+Give agents an experimental `todowrite` tool for tracking multi-step work.
+It is disabled by default; set `experimental.todo` to `true` to enable it.
+
+```jsonc
+{
+  "experimental": {
+    "todo": true,
+  },
+}
+```
+
+- The terminal client shows the current list in the session sidebar and each update in the timeline.
+- After compaction, open items are restored to the agent once so it can continue where it left off.
+- Permission rules for the `todowrite` action still apply, so you can deny it for specific agents.
+- The `experimental` object is not merged across configuration files. A project file that sets any
+  `experimental` field must also set `todo` to keep the tool enabled.
+
 ### Skills
 
 Add directories or URLs that OpenCode should search for agent skills.

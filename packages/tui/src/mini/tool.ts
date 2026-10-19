@@ -27,6 +27,7 @@ import {
 } from "../util/tool-display"
 import { formatPath } from "../util/path-format"
 import { isRecord } from "../util/record"
+import { parseTodos, type Todo } from "../util/todo"
 import type { RunEntryBody, StreamCommit, ToolSnapshot } from "./types"
 
 export { canonicalToolName } from "../util/tool-display"
@@ -117,6 +118,7 @@ type ToolName =
   | "patch"
   | "batch"
   | "subagent"
+  | "todowrite"
   | "question"
   | "read"
   | "glob"
@@ -457,6 +459,29 @@ function runPatch(p: ToolProps): ToolInline {
   }
 }
 
+function todoMark(item: Todo): string {
+  if (item.status === "completed") {
+    return "[✓]"
+  }
+
+  if (item.status === "in_progress") {
+    return "[•]"
+  }
+
+  return "[ ]"
+}
+
+function runTodo(p: ToolProps): ToolInline {
+  return {
+    icon: "#",
+    title: "Todos",
+    mode: "block",
+    body: parseTodos(p.frame.input.todos)
+      .map((item) => `${todoMark(item)} ${item.content}`)
+      .join("\n"),
+  }
+}
+
 function runQuestion(p: ToolProps): ToolInline {
   const total = list(p.frame.input.questions).length
   return {
@@ -607,6 +632,14 @@ function snapTask(p: ToolProps): ToolSnapshot {
     kind: "task",
     title: `# ${kind} Subagent`,
     rows,
+    tail: "",
+  }
+}
+
+function snapTodo(p: ToolProps): ToolSnapshot {
+  return {
+    kind: "todo",
+    items: parseTodos(p.frame.input.todos).map((item) => ({ ...item, mark: todoMark(item) })),
     tail: "",
   }
 }
@@ -794,6 +827,27 @@ function scrollTaskFinal(p: ToolProps): string {
   return `# ${kind} Subagent\n${row}`
 }
 
+function scrollTodoStart(_: ToolProps): string {
+  return ""
+}
+
+function scrollTodoFinal(p: ToolProps): string {
+  const items = parseTodos(p.frame.input.todos)
+  const time = span(p.frame)
+  const done = items.filter((item) => item.status === "completed").length
+  const active = items.filter((item) => item.status === "in_progress").length
+  const pending = items.filter((item) => item.status === "pending").length
+  return [
+    `${items.length} ${items.length === 1 ? "todo" : "todos"}`,
+    done > 0 ? `${done} done` : "",
+    active > 0 ? `${active} active` : "",
+    pending > 0 ? `${pending} pending` : "",
+    time,
+  ]
+    .filter(Boolean)
+    .join(" · ")
+}
+
 function scrollQuestionStart(_: ToolProps): string {
   return ""
 }
@@ -968,6 +1022,19 @@ const TOOL_RULES = {
     scroll: {
       start: scrollTaskStart,
       final: scrollTaskFinal,
+    },
+  },
+  todowrite: {
+    view: {
+      output: false,
+      final: true,
+      snap: "structured",
+    },
+    run: runTodo,
+    snap: snapTodo,
+    scroll: {
+      start: scrollTodoStart,
+      final: scrollTodoFinal,
     },
   },
   question: {

@@ -95,6 +95,19 @@ function monoBody(body: RunEntryBody): RunEntryBody {
   if (snapshot.kind === "task") {
     return textBody([snapshot.title, ...snapshot.rows, snapshot.tail].filter(Boolean).join("\n"))
   }
+  if (snapshot.kind === "todo") {
+    return textBody(
+      [
+        "# Todos",
+        ...snapshot.items.map((item) =>
+          item.status === "cancelled" ? `~${item.mark} ${item.content}~` : `${item.mark} ${item.content}`,
+        ),
+        snapshot.tail,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    )
+  }
   return textBody(
     ["# Questions", ...snapshot.items.flatMap((item) => [item.question, item.answer]), snapshot.tail]
       .filter(Boolean)
