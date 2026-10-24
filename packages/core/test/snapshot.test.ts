@@ -2,7 +2,9 @@ import { $ } from "bun"
 import { describe, expect } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
-import { Deferred, Effect, Fiber, Layer, Logger } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger } from "effect"
+import { ChildProcess } from "effect/process"
+import { AppProcess } from "@opencode/util/process"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Git } from "@opencode/core/git"
 import { Global } from "@opencode/util/global"
@@ -14,6 +16,60 @@ import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
 
 describe("Snapshot", () => {
+  testEffect(Layer.empty).live("keeps spawn failures best-effort without swallowing interruption", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          const project = path.join(tmp.path, "project")
+          yield* Effect.promise(async () => {
+            await fs.mkdir(project)
+            await fs.writeFile(path.join(project, "tracked.txt"), "one\n")
+            await initGit(project)
+          })
+          const proc = yield* AppProcess.Service.pipe(Effect.provide(AppNodeBuilder.build(AppProcess.node)))
+          let mode: "normal" | "sync" | "async" | "interrupt" = "normal"
+          const layer = AppNodeBuilder.build(Snapshot.node, [
+            Location.node.replace(Location.boundNode(Location.Ref.make({ directory: AbsolutePath.make(project) }))),
+            Global.node.replace(Global.layerWith({ data: tmp.path, config: path.join(tmp.path, "config") })),
+            AppProcess.node.replace(
+              Layer.succeed(AppProcess.Service, {
+                ...proc,
+                run: (command, options) => {
+                  if (mode === "interrupt") return Effect.interrupt
+                  if (command._tag !== "StandardCommand" || mode === "normal") return proc.run(command, options)
+                  // A NUL argument makes the real cross-spawn boundary throw synchronously on every OS.
+                  // A missing executable exercises its asynchronous error event instead.
+                  return proc.run(
+                    mode === "sync"
+                      ? ChildProcess.make(command.command, [...command.args, "\0"], command.options)
+                      : ChildProcess.make(path.join(project, "missing-git"), [], command.options),
+                    options,
+                  )
+                },
+              }),
+            ),
+          ])
+          yield* Effect.gen(function* () {
+            const snapshot = yield* Snapshot.Service
+            const first = yield* snapshot.capture()
+            expect(first).toBeDefined()
+            mode = "sync"
+            expect(yield* snapshot.capture()).toBeUndefined()
+            mode = "async"
+            expect(yield* snapshot.capture()).toBeUndefined()
+            mode = "interrupt"
+            const interrupted = yield* Effect.exit(snapshot.capture())
+            expect(Exit.isFailure(interrupted)).toBe(true)
+            if (Exit.isFailure(interrupted)) expect(Cause.hasInterrupts(interrupted.cause)).toBe(true)
+            mode = "normal"
+            expect(yield* snapshot.capture()).toBe(first)
+          }).pipe(Effect.provide(layer))
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   testEffect(Layer.empty).live("keeps lazy repository discovery after the first caller is interrupted", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),

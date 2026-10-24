@@ -277,32 +277,38 @@ const makeCrossSpawnSpawner = Effect.gen(function* () {
   }
 
   const launchProcess = (command: ChildProcess.StandardCommand, opts: NodeChildProcess.SpawnOptions) =>
-    Effect.callback<Spawned, PlatformError.PlatformError>((resume) => {
-      const closed = Deferred.makeUnsafe<readonly [code: number | null, signal: NodeJS.Signals | null]>()
-      const exited = Deferred.makeUnsafe<readonly [code: number | null, signal: NodeJS.Signals | null]>()
-      const proc = launch(command.command, command.args, opts)
-      let end = false
-      let exit: readonly [code: number | null, signal: NodeJS.Signals | null] | undefined
-      proc.on("error", (err) => {
-        resume(Effect.fail(toPlatformError("spawn", err, command)))
-      })
-      proc.on("exit", (...args) => {
-        exit = args
-        Deferred.doneUnsafe(exited, Exit.succeed(args))
-      })
-      proc.on("close", (...args) => {
-        if (end) return
-        end = true
-        Deferred.doneUnsafe(exited, Exit.succeed(exit ?? args))
-        Deferred.doneUnsafe(closed, Exit.succeed(exit ?? args))
-      })
-      proc.on("spawn", () => {
-        resume(Effect.succeed([proc, closed, exited]))
-      })
-      return Effect.sync(() => {
-        proc.kill("SIGTERM")
-      })
-    })
+    Effect.try({
+      try: () => launch(command.command, command.args, opts),
+      catch: (err) => toPlatformError("spawn", toError(err), command),
+    }).pipe(
+      Effect.flatMap((proc) =>
+        Effect.callback<Spawned, PlatformError.PlatformError>((resume) => {
+          const closed = Deferred.makeUnsafe<readonly [code: number | null, signal: NodeJS.Signals | null]>()
+          const exited = Deferred.makeUnsafe<readonly [code: number | null, signal: NodeJS.Signals | null]>()
+          let end = false
+          let exit: readonly [code: number | null, signal: NodeJS.Signals | null] | undefined
+          proc.on("error", (err) => {
+            resume(Effect.fail(toPlatformError("spawn", err, command)))
+          })
+          proc.on("exit", (...args) => {
+            exit = args
+            Deferred.doneUnsafe(exited, Exit.succeed(args))
+          })
+          proc.on("close", (...args) => {
+            if (end) return
+            end = true
+            Deferred.doneUnsafe(exited, Exit.succeed(exit ?? args))
+            Deferred.doneUnsafe(closed, Exit.succeed(exit ?? args))
+          })
+          proc.on("spawn", () => {
+            resume(Effect.succeed([proc, closed, exited]))
+          })
+          return Effect.sync(() => {
+            proc.kill("SIGTERM")
+          })
+        }),
+      ),
+    )
 
   const spawn = Effect.fnUntraced(function* (
     command: ChildProcess.StandardCommand,

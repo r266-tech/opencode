@@ -39,6 +39,16 @@ const waitForFile = (file: string) =>
 describe("AppProcess", () => {
   describe("run", () => {
     it.live(
+      "maps synchronous spawn exceptions to AppProcessError",
+      Effect.gen(function* () {
+        const svc = yield* AppProcess.Service
+        const error = yield* svc.run(cmd("\0")).pipe(Effect.flip)
+        expect(error).toBeInstanceOf(AppProcess.AppProcessError)
+        expect(error.command).toContain(NODE)
+      }),
+    )
+
+    it.live(
       "captures stdout and exit code zero",
       Effect.gen(function* () {
         const svc = yield* AppProcess.Service
