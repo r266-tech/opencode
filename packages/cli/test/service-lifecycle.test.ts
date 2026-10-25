@@ -17,6 +17,37 @@ const entry = path.join(import.meta.dir, "../src/index.ts")
 const serviceTest = process.platform === "win32" ? test.skip : test
 
 serviceTest(
+  "source service starts from outside the CLI package",
+  async () => {
+    await using home = await serviceHome()
+    const child = Bun.spawn([process.execPath, home.entry, "serve", "--service"], {
+      cwd: home.project,
+      env: home.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    let ready = false
+    const logs = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()])
+    const exited = child.exited.then(async (code) => {
+      if (ready) return
+      const [stdout, stderr] = await logs
+      throw new Error(`source service exited ${code}: ${[stdout, stderr].filter(Boolean).join("\n")}`)
+    })
+
+    await Promise.race([
+      settled(home).then((info) => {
+        ready = true
+        return info
+      }),
+      exited,
+    ])
+    await stopped(home)
+    await exited
+  },
+  120_000,
+)
+
+serviceTest(
   "concurrent CLI and client starts converge on one server",
   async () => {
     await using home = await serviceHome()
@@ -178,6 +209,8 @@ type Snapshot = Awaited<ReturnType<typeof snapshot>>
 async function serviceHome(options: { readonly failBoot?: boolean } = {}) {
   // Bun resolves symlinks in the entry path, so process command lines carry the real directory.
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-lifecycle-")))
+  const project = path.join(root, "project")
+  await fs.mkdir(project)
   const port = await availablePort()
   await fs.mkdir(path.join(root, "config"), { recursive: true })
   await fs.writeFile(path.join(root, "config", "service-local.json"), JSON.stringify({ port }))
@@ -189,6 +222,7 @@ async function serviceHome(options: { readonly failBoot?: boolean } = {}) {
   const overrides = options.failBoot ? { OPENCODE_DB: path.join(root, "database") } : {}
   const home = {
     root,
+    project,
     port,
     entry: homeEntry,
     registration: path.join(root, "state", "opencode", "service-local.json"),
