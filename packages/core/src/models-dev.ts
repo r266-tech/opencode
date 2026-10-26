@@ -360,8 +360,17 @@ export const layer = (options?: Options) =>
       const ttl = Duration.minutes(5)
       const lock = Semaphore.makeUnsafe(1)
 
+      // JSON decoding can fail inside KV.get, before the cache schema sees it.
+      const readCache = (key: string) =>
+        kv.get(key).pipe(
+          Effect.catchCauseIf(
+            (cause) => !Cause.hasInterruptsOnly(cause),
+            (cause) => Effect.logWarning("Failed to read models.dev cache", { cause }).pipe(Effect.as(undefined)),
+          ),
+        )
+
       const loadFromCache = Effect.fnUntraced(function* () {
-        const value = yield* kv.get(key)
+        const value = yield* readCache(key)
         const cached = Schema.decodeUnknownOption(Cache)(value)
         if (Option.isSome(cached))
           return {
@@ -451,7 +460,7 @@ export const layer = (options?: Options) =>
           .withPermit(
             Effect.gen(function* () {
               const stored = Option.getOrUndefined(
-                Schema.decodeUnknownOption(CacheMeta)((yield* kv.get(metaKey)) ?? (yield* kv.get(key))),
+                Schema.decodeUnknownOption(CacheMeta)((yield* readCache(metaKey)) ?? (yield* readCache(key))),
               )
               if (!force && stored && Date.now() - stored.updatedAt < Duration.toMillis(ttl)) return
               const response = yield* fetchApi(force ? undefined : stored?.etag).pipe(

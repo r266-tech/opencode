@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test"
+import { sql } from "drizzle-orm"
 import { Money } from "@opencode/schema/money"
-import { Effect, Fiber, Layer, Ref, Scope, Stream } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Ref, Scope, Stream } from "effect"
 import { HttpClient, HttpClientResponse } from "effect/http"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode/util/effect/app-node-platform"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "@opencode/core/bus"
+import { Database } from "@opencode/core/database/database"
 import { KV } from "@opencode/core/kv"
 import { Location } from "@opencode/core/location"
 import { Model } from "@opencode/core/model"
@@ -238,6 +240,57 @@ const initialState: MockState = {
 }
 
 describe("ModelsDev Service", () => {
+  for (const key of [cacheKey, metaKey]) {
+    it.live(`recovers a malformed SQLite ${key} value without removing unrelated data`, () =>
+      Effect.gen(function* () {
+        const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
+        yield* Effect.gen(function* () {
+          const db = (yield* Database.Service).db
+          const kv = yield* KV.Service
+          const service = yield* ModelsDev.Service
+          yield* kv.set("unrelated", { preserved: true })
+          yield* kv.set(cacheKey, { updatedAt: 0, body: JSON.stringify(fixture) })
+          yield* kv.set(metaKey, { updatedAt: 0 })
+          // Bypass the JSON encoder to exercise the actual KV read failure.
+          yield* db.run(sql`update kv set value = ${'{"digest":"\\&"}'} where key = ${key}`)
+
+          expect((yield* service.get()).length).toBeGreaterThan(0)
+          yield* service.refresh()
+          expect(yield* service.get()).toEqual(fixture2Snapshot)
+          expect(yield* kv.get(cacheKey)).toMatchObject({ body: JSON.stringify(fixture2) })
+          expect(yield* kv.get("unrelated")).toEqual({ preserved: true })
+          expect((yield* Ref.get(state)).calls).toHaveLength(1)
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(
+              AppNodeBuilder.build(LayerNode.group([ModelsDev.node, KV.node, Database.node]), [
+                ModelsDev.node.replace(ModelsDev.configured({ fetch: false })),
+                LayerNodePlatform.httpClient.replace(Layer.succeed(HttpClient.HttpClient, makeMockClient(state))),
+              ]),
+            ),
+          ),
+        )
+      }),
+    )
+  }
+
+  it.live("does not turn an interrupted cache read into a cache miss", () =>
+    Effect.gen(function* () {
+      const result = yield* ModelsDev.Service.use((service) => service.get()).pipe(
+        Effect.exit,
+        Effect.provide(
+          Layer.fresh(
+            AppNodeBuilder.build(ModelsDev.node, [
+              ModelsDev.node.replace(ModelsDev.configured({ fetch: false })),
+              KV.node.replace(Layer.mock(KV.Service, { get: () => Effect.interrupt })),
+            ]),
+          ),
+        ),
+      )
+      expect(Exit.isFailure(result) && Cause.hasInterruptsOnly(result.cause)).toBe(true)
+    }),
+  )
+
   it.live("get() returns normalized snapshots from KV when a cache entry exists", () =>
     Effect.gen(function* () {
       const cache = makeCache()
