@@ -1534,7 +1534,7 @@ describe("SessionTransfer", () => {
           text: `[redacted:text:${sourceMessageID}]`,
           skills: [{ id: "effect", name: "[redacted:skill-name:0]", text: "[redacted:skill:0]" }],
         },
-        { id: errorMessageID, error: { type: "test_error", message: "Original error" } },
+        { id: errorMessageID, error: { type: "test_error", message: `[redacted:compaction-error:${errorMessageID}]` } },
       ])
 
       yield* session.prompt({ sessionID, text: "Continue", resume: false })
@@ -1546,6 +1546,188 @@ describe("SessionTransfer", () => {
         "user",
       ])
       expect(yield* Bus.latestSequence(db, sessionID)).toBe(4)
+    }),
+  )
+
+  it.effect("redacts private error and historical location fields in sanitized exports", () =>
+    Effect.gen(function* () {
+      const session = yield* Session.Service
+      const transfer = yield* SessionTransfer.Service
+      const template = yield* session.create({ location, title: "Private transfer" })
+      const sessionID = Session.ID.create()
+      const switchID = SessionMessage.ID.create()
+      const assistantID = SessionMessage.ID.create()
+      const compactionID = SessionMessage.ID.create()
+      const idleID = SessionMessage.ID.create()
+      const model = Model.Ref.make({ id: Model.ID.make("model"), providerID: Provider.ID.make("provider") })
+      const error = (message: string, body: string) => ({
+        type: "provider_error",
+        message,
+        status: 502,
+        response: { body },
+        retryAfterMs: 250,
+      })
+
+      yield* transfer.import({
+        data: {
+          info: { ...template, id: sessionID },
+          messages: [
+            {
+              id: switchID,
+              type: "location-switched",
+              location: { directory: AbsolutePath.make("/private/SECRET_CURRENT_DIRECTORY") },
+              subpath: RelativePath.make("SECRET_CURRENT_SUBPATH"),
+              previous: {
+                location: { directory: AbsolutePath.make("/private/SECRET_PREVIOUS_DIRECTORY") },
+                subpath: RelativePath.make("SECRET_PREVIOUS_SUBPATH"),
+              },
+              time: { created: DateTime.makeUnsafe(100) },
+            },
+            {
+              id: assistantID,
+              type: "assistant",
+              agent: Agent.ID.make("build"),
+              model,
+              content: [
+                {
+                  type: "text",
+                  text: "SECRET_ASSISTANT_TEXT",
+                  native: { reason: "SECRET_TEXT_NATIVE" },
+                },
+                {
+                  type: "tool",
+                  id: "call_secret",
+                  name: "bash",
+                  native: { reason: "SECRET_TOOL_NATIVE" },
+                  state: {
+                    status: "error",
+                    input: { command: "SECRET_TOOL_INPUT" },
+                    error: error("SECRET_TOOL_ERROR", "SECRET_TOOL_RESPONSE"),
+                  },
+                  time: { created: DateTime.makeUnsafe(101) },
+                },
+              ],
+              native: { blockReason: "SECRET_ASSISTANT_NATIVE" },
+              error: error("SECRET_PROVIDER_ERROR", "SECRET_RESPONSE_BODY"),
+              retry: {
+                attempt: 1,
+                at: DateTime.makeUnsafe(101),
+                error: error("SECRET_RETRY_ERROR", "SECRET_RETRY_BODY"),
+              },
+              time: { created: DateTime.makeUnsafe(101), completed: DateTime.makeUnsafe(102) },
+            },
+            {
+              id: compactionID,
+              type: "compaction",
+              status: "failed",
+              reason: "manual",
+              error: error("SECRET_COMPACTION_ERROR", "SECRET_COMPACTION_BODY"),
+              time: { created: DateTime.makeUnsafe(103) },
+            },
+            {
+              id: idleID,
+              type: "idle",
+              outcome: "failed",
+              error: error("SECRET_IDLE_ERROR", "SECRET_IDLE_BODY"),
+              time: { created: DateTime.makeUnsafe(104) },
+            },
+          ],
+        },
+        location,
+      })
+
+      const sanitized = yield* transfer.export({ sessionID, sanitize: true })
+      const serialized = JSON.stringify(sanitized)
+      for (const marker of [
+        "SECRET_CURRENT_DIRECTORY",
+        "SECRET_PREVIOUS_DIRECTORY",
+        "SECRET_CURRENT_SUBPATH",
+        "SECRET_PREVIOUS_SUBPATH",
+        "SECRET_ASSISTANT_TEXT",
+        "SECRET_ASSISTANT_NATIVE",
+        "SECRET_TEXT_NATIVE",
+        "SECRET_TOOL_NATIVE",
+        "SECRET_TOOL_INPUT",
+        "SECRET_PROVIDER_ERROR",
+        "SECRET_RESPONSE_BODY",
+        "SECRET_RETRY_ERROR",
+        "SECRET_RETRY_BODY",
+        "SECRET_TOOL_ERROR",
+        "SECRET_TOOL_RESPONSE",
+        "SECRET_COMPACTION_ERROR",
+        "SECRET_COMPACTION_BODY",
+        "SECRET_IDLE_ERROR",
+        "SECRET_IDLE_BODY",
+      ])
+        expect(serialized).not.toContain(marker)
+
+      expect(sanitized.messages).toMatchObject([
+        {
+          id: switchID,
+          location: { directory: `/[redacted:location-directory:${switchID}]` },
+          subpath: `[redacted:location-subpath:${switchID}]`,
+          previous: {
+            location: { directory: `/[redacted:location-directory:${switchID}]` },
+            subpath: `[redacted:location-subpath:${switchID}]`,
+          },
+        },
+        {
+          id: assistantID,
+          native: { redacted: `assistant-native:${assistantID}` },
+          error: {
+            type: "provider_error",
+            message: `[redacted:assistant-error:${assistantID}]`,
+            status: 502,
+            response: { body: `[redacted:assistant-error-response:${assistantID}]` },
+            retryAfterMs: 250,
+          },
+          retry: {
+            error: {
+              type: "provider_error",
+              message: `[redacted:assistant-retry-error:${assistantID}]`,
+              status: 502,
+              response: { body: `[redacted:assistant-retry-error-response:${assistantID}]` },
+              retryAfterMs: 250,
+            },
+          },
+          content: [
+            { native: { redacted: `text-native:${assistantID}` } },
+            {
+              native: { redacted: `tool-native:${assistantID}` },
+              state: {
+                status: "error",
+                error: {
+                  type: "provider_error",
+                  message: `[redacted:tool-error:${assistantID}]`,
+                  status: 502,
+                  response: { body: `[redacted:tool-error-response:${assistantID}]` },
+                  retryAfterMs: 250,
+                },
+              },
+            },
+          ],
+        },
+        {
+          id: compactionID,
+          error: {
+            type: "provider_error",
+            message: `[redacted:compaction-error:${compactionID}]`,
+            status: 502,
+            response: { body: `[redacted:compaction-error-response:${compactionID}]` },
+            retryAfterMs: 250,
+          },
+        },
+        {
+          id: idleID,
+          error: {
+            type: "provider_error",
+            message: `[redacted:idle-error:${idleID}]`,
+            status: 502,
+            response: { body: `[redacted:idle-error-response:${idleID}]` },
+            retryAfterMs: 250,
+          },
+        },
+      ])
     }),
   )
 

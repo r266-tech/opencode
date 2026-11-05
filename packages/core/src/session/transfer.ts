@@ -1,6 +1,7 @@
 export * as SessionTransfer from "./transfer.js"
 
 import { SessionTransfer } from "@opencode/schema/session-transfer"
+import type { SessionError } from "@opencode/schema/session-error"
 import { Tool } from "@opencode/schema/tool"
 import { Skill } from "@opencode/schema/skill"
 import { eq } from "drizzle-orm"
@@ -211,6 +212,23 @@ function redact(kind: string, id: string, value: string) {
   return value.trim() ? `[redacted:${kind}:${id}]` : value
 }
 
+function sanitizeLocation(kind: string, id: string, location: Location.Ref): Location.Ref {
+  return {
+    ...location,
+    directory: AbsolutePath.make(`/${redact(kind, id, location.directory)}`),
+  }
+}
+
+function sanitizeError(kind: string, id: string, error: SessionError.Error): SessionError.Error {
+  return {
+    ...error,
+    message: redact(`${kind}-error`, id, error.message),
+    response: error.response
+      ? { ...error.response, body: redact(`${kind}-error-response`, id, error.response.body) }
+      : undefined,
+  }
+}
+
 function metadata(kind: string, id: string, value: Readonly<Record<string, unknown>> | undefined) {
   if (!value) return value
   return Object.keys(value).length > 0 ? { redacted: `${kind}:${id}` } : value
@@ -225,10 +243,7 @@ function sanitize(data: Data): Data {
         data.info.metadata && Object.keys(data.info.metadata).length > 0
           ? { redacted: `session-metadata:${data.info.id}` }
           : data.info.metadata,
-      location: {
-        ...data.info.location,
-        directory: AbsolutePath.make(`/${redact("session-directory", data.info.id, data.info.location.directory)}`),
-      },
+      location: sanitizeLocation("session-directory", data.info.id, data.info.location),
       revert: data.info.revert
         ? {
             ...data.info.revert,
@@ -246,6 +261,26 @@ function sanitize(data: Data): Data {
 
 function sanitizeMessage(message: SessionMessage.Info): SessionMessage.Info {
   const meta = metadata("message-metadata", message.id, message.metadata)
+  if (message.type === "location-switched")
+    return {
+      ...message,
+      metadata: meta,
+      location: sanitizeLocation("location-directory", message.id, message.location),
+      subpath:
+        message.subpath === undefined
+          ? undefined
+          : RelativePath.make(redact("location-subpath", message.id, message.subpath)),
+      previous: message.previous
+        ? {
+            ...message.previous,
+            location: sanitizeLocation("location-directory", message.id, message.previous.location),
+            subpath:
+              message.previous.subpath === undefined
+                ? undefined
+                : RelativePath.make(redact("location-subpath", message.id, message.previous.subpath)),
+          }
+        : undefined,
+    }
   if (message.type === "user")
     return {
       ...message,
@@ -303,6 +338,11 @@ function sanitizeMessage(message: SessionMessage.Info): SessionMessage.Info {
     return {
       ...message,
       metadata: meta,
+      native: message.native ? { redacted: `assistant-native:${message.id}` } : undefined,
+      error: message.error ? sanitizeError("assistant", message.id, message.error) : undefined,
+      retry: message.retry
+        ? { ...message.retry, error: sanitizeError("assistant-retry", message.id, message.retry.error) }
+        : undefined,
       content: message.content.map((content) => {
         if (content.type === "text")
           return {
@@ -328,6 +368,7 @@ function sanitizeMessage(message: SessionMessage.Info): SessionMessage.Info {
       return {
         ...message,
         metadata: meta,
+        error: sanitizeError("compaction", message.id, message.error),
       }
     return {
       ...message,
@@ -336,6 +377,12 @@ function sanitizeMessage(message: SessionMessage.Info): SessionMessage.Info {
       ...(message.status === "completed" ? { native: metadata("compaction-native", message.id, message.native) } : {}),
     }
   }
+  if (message.type === "idle")
+    return {
+      ...message,
+      metadata: meta,
+      error: message.error ? sanitizeError("idle", message.id, message.error) : undefined,
+    }
   return { ...message, metadata: meta }
 }
 
@@ -354,6 +401,7 @@ function sanitizeToolState(id: string, state: SessionMessage.ToolState): Session
   return {
     ...state,
     input: { redacted: `tool-input:${id}` },
+    error: sanitizeError("tool", id, state.error),
     content: state.content ? map(state.content, (item) => sanitizeToolContent(id, item)) : undefined,
     metadata: meta,
   }
