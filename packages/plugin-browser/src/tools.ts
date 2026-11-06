@@ -23,6 +23,27 @@ export const register = Effect.fn("BrowserTools.register")(function* (
       catch: (error) => new Tool.Error({ message: invalidURL, error }),
     })
     const target = yield* connection.target(tool.sessionID, action)
+    if (action.type === "preview")
+      yield* Effect.tryPromise({
+        try: async () => {
+          const { stat } = await import("node:fs/promises")
+          const { resolve } = await import("node:path")
+          const { parsePathLineSuffix } = await import("@opencode/util/path")
+          const path = parsePathLineSuffix(action.path.trim().replaceAll("\\", "/")).path
+          const { fileURLToPath } = await import("node:url")
+          if (
+            !(
+              await stat(resolve(ctx.location.directory, /^file:\/\//i.test(path) ? fileURLToPath(path) : path))
+            ).isFile()
+          )
+            throw new Error("Preview paths must name files, not directories.")
+        },
+        catch: (error) =>
+          new Tool.Error({
+            message: `Cannot preview file on the server. Check that the path exists and names a file relative to the workspace, or use an absolute path. ${error instanceof Error ? error.message : String(error)}`,
+            error,
+          }),
+      })
     const uploads =
       action.type === "files.upload" || action.type === "files.drop"
         ? yield* BrowserFiles.read(action.paths, ctx.location.directory)
