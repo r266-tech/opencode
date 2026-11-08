@@ -17,6 +17,37 @@ const entry = path.join(import.meta.dir, "../src/index.ts")
 const serviceTest = process.platform === "win32" ? test.skip : test
 
 serviceTest(
+  "source service starts from outside the CLI package",
+  async () => {
+    await using home = await serviceHome()
+    const child = Bun.spawn([process.execPath, home.entry, "serve", "--service"], {
+      cwd: home.root,
+      env: home.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    let ready = false
+    const logs = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()])
+    const exited = child.exited.then(async (code) => {
+      if (ready) return
+      const [stdout, stderr] = await logs
+      throw new Error(`source service exited ${code}: ${[stdout, stderr].filter(Boolean).join("\n")}`)
+    })
+
+    await Promise.race([
+      settled(home).then((info) => {
+        ready = true
+        return info
+      }),
+      exited,
+    ])
+    await stopped(home)
+    await exited
+  },
+  120_000,
+)
+
+serviceTest(
   "concurrent CLI and client starts converge on one server",
   async () => {
     await using home = await serviceHome()
