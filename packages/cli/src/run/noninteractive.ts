@@ -64,9 +64,35 @@ const PERMISSION_REJECTED_FEEDBACK =
  *   any state + abort (SIGINT/SIGTERM) → cancelling → done
  */
 export async function runNonInteractivePrompt(input: Input) {
+  if (input.signal.aborted) return
   const controller = new AbortController()
   const stream = input.client.event.subscribe({ signal: controller.signal })[Symbol.asyncIterator]()
-  if ((await stream.next()).done) throw new Error("Event stream disconnected before prompt admission")
+  // A buffering proxy may deliver headers without the first event. Bound only startup, not the turn.
+  const timeout = setTimeout(
+    () =>
+      controller.abort(
+        new Error(
+          "Timed out waiting for the server event stream to connect; check whether a proxy is buffering /api/event",
+        ),
+      ),
+    10_000,
+  )
+  const abort = () => controller.abort(input.signal.reason)
+  input.signal.addEventListener("abort", abort, { once: true })
+  try {
+    input.signal.throwIfAborted()
+    if ((await stream.next()).done) throw new Error("Event stream disconnected before prompt admission")
+    input.signal.throwIfAborted()
+  } catch (error) {
+    const failure = controller.signal.reason ?? error
+    controller.abort()
+    void stream.return?.(undefined).catch(() => {})
+    if (input.signal.aborted) return
+    throw failure
+  } finally {
+    clearTimeout(timeout)
+    input.signal.removeEventListener("abort", abort)
+  }
 
   const messageID = SessionMessage.ID.create()
   const render = renderer(input)

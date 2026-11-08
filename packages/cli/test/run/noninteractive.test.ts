@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
+import { afterEach, describe, expect, jest, mock, spyOn, test } from "bun:test"
 import {
   ClientError,
   OpenCode,
@@ -370,9 +370,50 @@ async function capture(input: Parameters<typeof run>[0]) {
 }
 
 afterEach(() => {
+  jest.useRealTimers()
   mock.restore()
   process.exitCode = 0
 })
+
+function stalled(signal: AbortSignal) {
+  const requested = Promise.withResolvers<AbortSignal>()
+  const requests: string[] = []
+  const client = OpenCode.make({
+    baseUrl: "https://opencode.test",
+    fetch: Object.assign(
+      async (url: RequestInfo | URL, options?: RequestInit) => {
+        const request = new Request(url, options)
+        requests.push(new URL(request.url).pathname)
+        requested.resolve(request.signal)
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              request.signal.addEventListener("abort", () => controller.close(), { once: true })
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        )
+      },
+      { preconnect: fetch.preconnect },
+    ),
+  })
+  const running = runNonInteractivePrompt({
+    client,
+    sessionID: "ses_1",
+    location,
+    message: "hello",
+    files: [],
+    thinking: false,
+    format: "default",
+    auto: false,
+    standalone: false,
+    signal,
+    renderTool: () => Promise.resolve(),
+    renderToolError: () => Promise.resolve(),
+  })
+  running.catch(requested.reject)
+  return { running, requested: requested.promise, requests }
+}
 
 function shellJob(id: string, command: string): ExperimentalJobListOutput[number] {
   return { kind: "shell", id, sessionID: "ses_1", status: "running", shellID: id, command, time: { started: 1 } }
@@ -390,6 +431,35 @@ const subagentJob: ExperimentalJobListOutput[number] = {
 }
 
 describe("runNonInteractivePrompt", () => {
+  test("fails a stalled event subscription before admitting a prompt", async () => {
+    jest.useFakeTimers()
+    const source = stalled(new AbortController().signal)
+    const transport = await source.requested
+    const result = source.running.catch((error: unknown) => error)
+    jest.advanceTimersByTime(10_000)
+    expect(await result).toMatchObject({ message: expect.stringContaining("proxy is buffering /api/event") })
+    expect(transport.aborted).toBe(true)
+    expect(source.requests).toEqual(["/api/event"])
+  })
+
+  test("cancels a stalled event subscription without admitting a prompt", async () => {
+    const controller = new AbortController()
+    const source = stalled(controller.signal)
+    const transport = await source.requested
+    controller.abort()
+    await source.running
+    expect(transport.aborted).toBe(true)
+    expect(source.requests).toEqual(["/api/event"])
+  })
+
+  test("does not subscribe when cancelled before startup", async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const source = stalled(controller.signal)
+    await source.running
+    expect(source.requests).toEqual([])
+  })
+
   test("keeps formatted tool output and compact tool metadata in JSON", async () => {
     const output = await capture({ format: "json", turn: successfulGrep })
     const events = output.stdout
