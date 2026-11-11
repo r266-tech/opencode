@@ -191,10 +191,25 @@ it.live("pairing links sign in browsers with a cookie and API clients with a tok
     const rejected = yield* request("/api/pair", { method: "POST" })
     expect(rejected.status).toBe(401)
     expect(rejected.headers.get("www-authenticate")).toBe('Basic realm="Secure Area"')
-    // A Basic challenge on fetch makes browsers show a native prompt instead of the app's sign-in screen.
-    const fetched = yield* request("/api/info", { headers: { "sec-fetch-mode": "cors" } })
-    expect(fetched.status).toBe(401)
-    expect(fetched.headers.get("www-authenticate")).toBeNull()
+    // Plain HTTP LAN origins omit Fetch Metadata, but still send Origin or Referer on API requests.
+    yield* Effect.forEach(["/api/info", "/api/event"], (pathname) =>
+      Effect.forEach(
+        [
+          { headers: new Headers({ "sec-fetch-mode": "cors" }), challenge: false },
+          { headers: new Headers({ origin: base }), challenge: false },
+          { headers: new Headers({ referer: `${base}/` }), challenge: false },
+          { headers: new Headers({ "sec-fetch-mode": "navigate", referer: `${base}/` }), challenge: true },
+          { headers: new Headers({ accept: "text/html", referer: `${base}/` }), challenge: true },
+        ],
+        (input) =>
+          Effect.gen(function* () {
+            const response = yield* request(pathname, { headers: input.headers })
+            expect(response.status).toBe(401)
+            expect(response.headers.get("www-authenticate")).toBe(input.challenge ? 'Basic realm="Secure Area"' : null)
+            yield* Effect.promise(() => response.arrayBuffer())
+          }),
+      ),
+    )
 
     const browser = yield* pair
     expect(browser.expires_in).toBe(300)

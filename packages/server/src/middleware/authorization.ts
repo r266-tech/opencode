@@ -45,7 +45,10 @@ const UNAUTHORIZED_MESSAGE = "Authentication required"
 // before it can show its own sign-in screen. Only non-browser clients and page navigations get the challenge.
 function challengeRequest(request: HttpServerRequest.HttpServerRequest) {
   const mode = request.headers["sec-fetch-mode"]
-  return mode === undefined || mode === "navigate"
+  if (mode !== undefined) return mode === "navigate"
+  // Browsers omit Fetch Metadata on plain HTTP LAN origins. Their API requests still carry Origin or Referer.
+  if (request.headers.origin === undefined && request.headers.referer === undefined) return true
+  return request.headers.accept?.includes("text/html") ?? false
 }
 
 // Matches what the Authorization middleware encodes, for requests rejected before the HttpApi runs.
