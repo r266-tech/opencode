@@ -1,11 +1,13 @@
 import { NodeServices } from "@effect/platform-node"
+import { CrossSpawnSpawner } from "@opencode/util/cross-spawn-spawner"
 import { EffectFlock } from "@opencode/util/effect-flock"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Global } from "@opencode/util/global"
 import { AppProcess } from "@opencode/util/process"
 import { expect, spyOn, test } from "bun:test"
-import { Effect, FileSystem, Layer, PlatformError, Stream } from "effect"
-import { ChildProcessSpawner } from "effect/process"
+import { Deferred, Effect, Fiber, FileSystem, Layer, PlatformError, Ref, Sink, Stream } from "effect"
+import { TestClock } from "effect/testing"
+import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { Updater } from "../src/services/updater"
@@ -19,8 +21,10 @@ function fixture(
   respond: (command: {
     readonly command: string
     readonly args: ReadonlyArray<string>
+    readonly options?: AppProcess.RunOptions
   }) => Partial<AppProcess.RunResult> & {
     error?: AppProcess.AppProcessError
+    run?: Effect.Effect<AppProcess.RunResult, AppProcess.AppProcessError>
   } = () => ({}),
   name = "@opencode/cli",
   failCleanup = false,
@@ -116,22 +120,23 @@ function fixture(
         AppProcess.Service,
         AppProcess.Service.of({
           ...spawner,
-          run: (command) =>
-            Effect.suspend(() => {
-              if (command._tag !== "StandardCommand") return Effect.die("Unexpected piped install command")
+          run: (command, options) =>
+            Effect.gen(function* () {
+              if (command._tag !== "StandardCommand") return yield* Effect.die("Unexpected piped install command")
               const args = command.args.map(String)
               const lookup = command.command === "git" && args[0] === "--exec-path"
               if (!lookup) commands.push([command.command, ...args])
               if (!lookup) paths.push(command.options.env?.PATH?.toString())
-              const result = lookup
+              const response = lookup
                 ? { stdout: Buffer.from(`${path.join(git, "mingw64", "libexec", "git-core")}\n`) }
-                : respond({ command: command.command, args })
-              if (result.error) return Effect.fail(result.error)
+                : respond({ command: command.command, args, options })
+              if (response.error) return yield* Effect.fail(response.error)
+              const result = response.run ? yield* response.run : response
               // Successful installs replace the running copy, which the updater verifies afterwards.
               const installed = args.find((arg) => arg.startsWith(`${name}@`))?.slice(name.length + 1)
               if (!formula && !executableOverride && installed && (result.exitCode ?? 0) === 0)
                 writeFileSync(manifest, JSON.stringify({ name, version: installed, bin: { opencode: "bin/opencode" } }))
-              return Effect.succeed({
+              return {
                 command: command.command,
                 exitCode: 0,
                 stdout: Buffer.alloc(0),
@@ -139,7 +144,7 @@ function fixture(
                 stdoutTruncated: false,
                 stderrTruncated: false,
                 ...result,
-              })
+              }
             }),
           runStream: () => Stream.die("Unexpected streaming install command"),
         }),
@@ -185,6 +190,102 @@ installs.forEach(({ method, command }) => {
     }),
   )
 })
+
+// Exercise the real AppProcess timeout and scope with a process whose exit the test controls.
+const pendingProcess = Effect.gen(function* () {
+  const started = yield* Deferred.make<void>()
+  const completed = yield* Deferred.make<ChildProcessSpawner.ExitCode>()
+  const released = yield* Ref.make(false)
+  const handle = ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(1),
+    exitCode: Deferred.await(completed),
+    isRunning: Deferred.isDone(completed).pipe(Effect.map((done) => !done)),
+    kill: () => Deferred.succeed(completed, ChildProcessSpawner.ExitCode(1)).pipe(Effect.asVoid),
+    stdin: Sink.drain,
+    stdout: Stream.empty,
+    stderr: Stream.empty,
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+    unref: Effect.succeed(Effect.void),
+  })
+  const process = yield* AppProcess.Service.pipe(
+    Effect.provide(
+      LayerNode.compile(AppProcess.node, {
+        replacements: [
+          CrossSpawnSpawner.node.replace(
+            Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make(() =>
+                Effect.acquireRelease(Deferred.succeed(started, undefined).pipe(Effect.as(handle)), () =>
+                  Ref.set(released, true),
+                ),
+              ),
+            ),
+          ),
+        ],
+      }),
+    ),
+  )
+  return {
+    started,
+    released,
+    complete: Deferred.succeed(completed, ChildProcessSpawner.ExitCode(0)),
+    run: process.run,
+  }
+})
+
+;(["npm", "pnpm", "bun", "yarn", "vp", "brew", "winget", "curl"] as const).forEach((method) => {
+  it.effect(`${method} lets a slow installation finish after five minutes`, () =>
+    Effect.gen(function* () {
+      const pending = yield* pendingProcess
+      const test = yield* fixture((command) =>
+        command.command === "curl"
+          ? {}
+          : { run: pending.run(ChildProcess.make(command.command, command.args), command.options) },
+      )
+      const upgrade = yield* test.updater.upgrade(method, "2.3.4").pipe(Effect.forkChild({ startImmediately: true }))
+      yield* Deferred.await(pending.started)
+      yield* TestClock.adjust("6 minutes")
+      expect(upgrade.pollUnsafe()).toBeUndefined()
+      expect(yield* Ref.get(pending.released)).toBe(false)
+      yield* pending.complete
+      yield* Fiber.join(upgrade)
+      expect(yield* Ref.get(pending.released)).toBe(true)
+    }),
+  )
+})
+
+it.effect("curl still times out a stalled installer download", () =>
+  Effect.gen(function* () {
+    const pending = yield* pendingProcess
+    const test = yield* fixture((command) => ({
+      run: pending.run(ChildProcess.make(command.command, command.args), command.options),
+    }))
+    const upgrade = yield* test.updater
+      .upgrade("curl", "2.3.4")
+      .pipe(Effect.flip, Effect.forkChild({ startImmediately: true }))
+    yield* Deferred.await(pending.started)
+    yield* TestClock.adjust("5 minutes")
+    const error = yield* Fiber.join(upgrade)
+    expect(error).toMatchObject({ title: "Could not download the OpenCode installer", detail: "Timed out" })
+    expect(test.commands.map((command) => command[0])).toEqual(["curl"])
+    expect(yield* Ref.get(pending.released)).toBe(true)
+  }),
+)
+
+it.effect("cancelling a slow installation still releases its process", () =>
+  Effect.gen(function* () {
+    const pending = yield* pendingProcess
+    const test = yield* fixture((command) => ({
+      run: pending.run(ChildProcess.make(command.command, command.args), command.options),
+    }))
+    const upgrade = yield* test.updater.upgrade("npm", "2.3.4").pipe(Effect.forkChild({ startImmediately: true }))
+    yield* Deferred.await(pending.started)
+    yield* Fiber.interrupt(upgrade)
+    expect(yield* Ref.get(pending.released)).toBe(true)
+  }),
+)
 
 // Installs a 2.2.7 package at <root>/<directory>, optionally with an npm in <root>/bin.
 const installed = (directory: string[], npm = false) =>
