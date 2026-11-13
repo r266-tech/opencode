@@ -64,11 +64,11 @@ export function permissionPresentation(
   }
 
   if (action === "shell") {
-    const command = text(input.command)
+    const commands = resources.length ? resources : [text(input.command)].filter(Boolean)
     return {
       icon: "#",
       title: "Shell command",
-      lines: command ? [`$ ${command}`] : resources.map((item) => `- ${item}`),
+      lines: commands.map((command) => `$ ${command}`),
     }
   }
 
