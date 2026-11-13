@@ -1,0 +1,125 @@
+[
+  {
+    "stage": "child-visible",
+    "root": "ses_e2989ce52ffentjkQYHwHrdOWF",
+    "child": "ses_e2989cd22ffeO6Y298plm9ow53",
+    "request": {
+      "id": "per_1d6763388001qKKYhmNq0QRzeR",
+      "effect": "ask"
+    },
+    "dialog": {
+      "id": "session.permission",
+      "instance": "per_1d6763388001qKKYhmNq0QRzeR",
+      "role": "dialog",
+      "label": "Permission required: Shell command",
+      "element": 1625,
+      "expanded": false
+    }
+  },
+  {
+    "stage": "root-preempts-child",
+    "request": {
+      "id": "per_1d67634ae00140uC6oMFiBMZ62",
+      "effect": "ask"
+    },
+    "dialog": {
+      "id": "session.permission",
+      "instance": "per_1d67634ae00140uC6oMFiBMZ62",
+      "role": "dialog",
+      "label": "Permission required: Shell command",
+      "element": 1706,
+      "expanded": false
+    },
+    "pending": {
+      "location": {
+        "directory": "<isolated fixture project>"
+      },
+      "data": [
+        {
+          "id": "per_1d6763388001qKKYhmNq0QRzeR",
+          "sessionID": "ses_e2989cd22ffeO6Y298plm9ow53",
+          "action": "shell",
+          "resources": ["echo CHILD_FIRST"]
+        },
+        {
+          "id": "per_1d67634ae00140uC6oMFiBMZ62",
+          "sessionID": "ses_e2989ce52ffentjkQYHwHrdOWF",
+          "action": "shell",
+          "resources": ["echo ROOT_SECOND"]
+        }
+      ]
+    }
+  },
+  {
+    "stage": "after-enter",
+    "remaining": {
+      "location": {
+        "directory": "<isolated fixture project>"
+      },
+      "data": [
+        {
+          "id": "per_1d6763388001qKKYhmNq0QRzeR",
+          "sessionID": "ses_e2989cd22ffeO6Y298plm9ow53",
+          "action": "shell",
+          "resources": ["echo CHILD_FIRST"]
+        }
+      ]
+    },
+    "childStillPending": true,
+    "rootApproved": true
+  },
+  {
+    "stage": "same-session-does-not-preempt",
+    "first": {
+      "id": "per_1d6763553001RSlDYTXPUpoiQu",
+      "effect": "ask"
+    },
+    "second": {
+      "id": "per_1d676358a001kublfGySIuf3z5",
+      "effect": "ask"
+    },
+    "dialog": {
+      "id": "session.permission",
+      "instance": "per_1d6763553001RSlDYTXPUpoiQu",
+      "role": "dialog",
+      "label": "Permission required: Shell command",
+      "element": 1850,
+      "expanded": false
+    },
+    "pending": {
+      "location": {
+        "directory": "<isolated fixture project>"
+      },
+      "data": [
+        {
+          "id": "per_1d6763553001RSlDYTXPUpoiQu",
+          "sessionID": "ses_e2989ce52ffentjkQYHwHrdOWF",
+          "action": "shell",
+          "resources": ["echo SAME_SESSION_FIRST"]
+        },
+        {
+          "id": "per_1d676358a001kublfGySIuf3z5",
+          "sessionID": "ses_e2989ce52ffentjkQYHwHrdOWF",
+          "action": "shell",
+          "resources": ["echo SAME_SESSION_SECOND"]
+        }
+      ]
+    }
+  },
+  {
+    "stage": "same-session-enter-approves-first",
+    "remaining": {
+      "location": {
+        "directory": "<isolated fixture project>"
+      },
+      "data": [
+        {
+          "id": "per_1d676358a001kublfGySIuf3z5",
+          "sessionID": "ses_e2989ce52ffentjkQYHwHrdOWF",
+          "action": "shell",
+          "resources": ["echo SAME_SESSION_SECOND"]
+        }
+      ]
+    }
+  }
+]
