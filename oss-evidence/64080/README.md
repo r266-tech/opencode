@@ -39,3 +39,26 @@ The new committed regression fails on the base: one failed resolution followed b
 Local results: 120 randomized daemon-test passes; 66 related PTY, session, shell and restart passes / 2 skips; root lint/all 35 typechecks and Core official TypeScript pass. #61750 is a separate ownership/registration consistency fix and does not add startup backoff.
 
 The original sandbox's AF_UNIX permission denial, the reported idle retry loop, Windows and Linux were not reproduced. This patch does not change the sandbox policy or permanently disable the daemon. AI-assisted implementation and verification.
+
+## HTTP shell-path confirmation
+
+The standalone POSIX diagnostic [`http-shell-probe.py`](./http-shell-probe.py) starts the actual CLI HTTP server with [`unreachable-pty.py`](./unreachable-pty.py) as `OPENCODE_PTY_BIN`. It makes two consecutive `POST /api/shell` requests, polls their final status and output, then observes six seconds without requests. No model or provider is called. Application state uses isolated XDG directories and `OPENCODE_TEST_HOME`; the host `HOME` stays unchanged. Cleanup targets the probe's own server and helper processes.
+
+Both builds returned `oss-http-shell-ok` with exit code 0 for both commands. [Recorded results](./http-shell-results.json):
+
+| Build | First create | Second create | Cumulative helper starts |
+| --- | --- | --- | --- |
+| `dev d432a06b9c` | 20166 ms | 20155 ms | 4, then 8 |
+| Candidate `1def5d6749` | 10175 ms | 12 ms | 2, then 2 |
+
+This confirms that the startup backoff survives separate HTTP requests through the real shell fallback. The command still incurs its initial startup attempts. These macOS/Bun 1.4.4 observations are not a performance guarantee; the assertions use helper counts and command results.
+
+Copy the two Python files to a directory outside the checkout before switching branches. With dependencies installed in the checkout, run from its root, using a fresh output directory:
+
+```sh
+python3 /path/to/http-shell-probe.py "$PWD" /tmp/pty-http-evidence candidate
+# On the unmodified d432a06b9c checkout:
+python3 /path/to/http-shell-probe.py "$PWD" /tmp/pty-http-evidence baseline
+```
+
+The runner takes `WORKTREE OUTPUT_DIR baseline|candidate`, binds loopback port 0 and writes each case below `OUTPUT_DIR`. Python 3 and the repository's Bun version are required. This is a slow manual diagnostic, kept out of CI. Neither build started another helper during the six-second idle observation, so this does not establish the reported idle-loop cause. The original `nono` sandbox and Windows/Linux remain untested. AI-assisted verification.

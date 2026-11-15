@@ -1,0 +1,62 @@
+{
+  "environment": {
+    "os": "macOS arm64",
+    "bun": "1.4.4"
+  },
+  "entrypoint": "CLI serve, POST /api/shell, then GET /api/shell/:id and /output",
+  "fixture": "helper writes protocol-8 registration, stays alive, never creates advertised AF_UNIX socket",
+  "assertion": "helper startup counts and exact exit/output; wall time is diagnostic only",
+  "runs": [
+    {
+      "label": "baseline",
+      "head": "d432a06b9c07bab0be4e8d642173b1cb14137f11",
+      "create_ms": [
+        20166,
+        20155
+      ],
+      "cumulative_helper_starts": [
+        4,
+        8
+      ],
+      "exit_codes": [
+        0,
+        0
+      ],
+      "output": [
+        "oss-http-shell-ok\n",
+        "oss-http-shell-ok\n"
+      ],
+      "idle_seconds": 6,
+      "helper_starts_before_idle": 8,
+      "helper_starts_after_idle": 8
+    },
+    {
+      "label": "candidate",
+      "head": "1def5d67493f0216e00c760b5ed82f5b9b06958e",
+      "create_ms": [
+        10175,
+        12
+      ],
+      "cumulative_helper_starts": [
+        2,
+        2
+      ],
+      "exit_codes": [
+        0,
+        0
+      ],
+      "output": [
+        "oss-http-shell-ok\n",
+        "oss-http-shell-ok\n"
+      ],
+      "idle_seconds": 6,
+      "helper_starts_before_idle": 2,
+      "helper_starts_after_idle": 2
+    }
+  ],
+  "limits": [
+    "No model/provider or original nono/Seatbelt execution",
+    "The six-second idle observation did not reproduce the idle-loop claim on either build",
+    "No Windows or Linux execution"
+  ]
+}
