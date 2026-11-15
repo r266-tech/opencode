@@ -101,6 +101,8 @@ export function addServerViewModel(input: {
     catalogSearch,
     adding: selectWslDialogAdding(input.dialog),
     busy: working || input.probingAddable,
+    refreshingCatalog: state?.hostJob === "catalog",
+    catalogError: state?.catalogError ?? null,
     runtimeState: addServerRuntimeState(state),
     visibleInstalledDistros,
     visibleOnlineDistros,

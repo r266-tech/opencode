@@ -27,8 +27,8 @@ export type WslDistro =
   | { readonly status: "starting"; readonly attempt: string }
   | { readonly status: "removing"; readonly attempt: string }
 
-/** WSL itself: probing the runtime, listing distros or installing WSL, one at a time. */
-export type WslHost = { readonly status: "idle" } | { readonly status: "busy"; readonly attempt: string }
+/** Catalog loading continues after the installed list is ready, without blocking local distro actions. */
+export type WslHost = { readonly status: "idle" } | { readonly status: "busy" | "catalog"; readonly attempt: string }
 
 export type WslHostJob = "probe-runtime" | "refresh-distros" | "install-wsl"
 
@@ -36,6 +36,7 @@ type Data = {
   readonly runtime: WslRuntimeCheck | null
   readonly installed: readonly WslInstalledDistro[]
   readonly online: readonly WslOnlineDistro[]
+  readonly catalogError: string | null
   readonly distroProbes: Readonly<Record<string, WslDistroProbe>>
   readonly opencodeChecks: Readonly<Record<string, WslOpencodeCheck>>
   readonly pendingRestart: boolean
@@ -69,8 +70,13 @@ export type WslMachineEvent =
       readonly type: "distros.listed"
       readonly attempt: string
       readonly installed: readonly WslInstalledDistro[]
+    }
+  | {
+      readonly type: "catalog.listed"
+      readonly attempt: string
       readonly online: readonly WslOnlineDistro[]
     }
+  | { readonly type: "catalog.failed"; readonly attempt: string; readonly message: string }
   | { readonly type: "host.failed"; readonly attempt: string; readonly message: string }
   | {
       readonly type: "distro.probed"
@@ -89,7 +95,6 @@ export type WslMachineEvent =
       readonly distro: string
       readonly attempt: string
       readonly installed: readonly WslInstalledDistro[]
-      readonly online: readonly WslOnlineDistro[]
       readonly probe: WslDistroProbe
     }
   | {
@@ -171,6 +176,7 @@ export function createWslMachineState(configured: readonly WslServerConfig[]): W
     runtime: null,
     installed: [],
     online: [],
+    catalogError: null,
     distroProbes: {},
     opencodeChecks: {},
     pendingRestart: false,
@@ -199,7 +205,23 @@ export function transitionWslMachine(state: WslMachineState, event: WslMachineEv
   }
 
   if (event.type === "distros.listed") {
-    return hostSettled(state, event.attempt, { installed: event.installed, online: event.online })
+    if (state.host.status !== "busy" || state.host.attempt !== event.attempt) return next(state)
+
+    return next(
+      { ...state, installed: event.installed, catalogError: null, host: { status: "catalog", attempt: event.attempt } },
+      [resolve(event.attempt)],
+    )
+  }
+
+  if (event.type === "catalog.listed" || event.type === "catalog.failed") {
+    if (state.host.status !== "catalog" || state.host.attempt !== event.attempt) return next(state)
+
+    if (event.type === "catalog.listed")
+      return next({ ...state, online: event.online, catalogError: null, host: { status: "idle" } })
+
+    return next({ ...state, catalogError: event.message, host: { status: "idle" } }, [
+      { type: "log", level: "error", message: "wsl catalog refresh failed", data: { message: event.message } },
+    ])
   }
 
   if (event.type === "host.failed") return hostFailed(state, event.attempt, event.message)
@@ -245,6 +267,7 @@ export function toServersState(state: WslMachineState): WslServersState {
     runtime: state.runtime,
     installed: state.installed,
     online: state.online,
+    catalogError: state.catalogError,
     distroProbes: state.distroProbes,
     opencodeChecks: state.opencodeChecks,
     pendingRestart: state.pendingRestart,
@@ -290,6 +313,7 @@ function close(state: OpenState): WslMachineTransition {
       runtime: state.runtime,
       installed: state.installed,
       online: state.online,
+      catalogError: state.catalogError,
       distroProbes: state.distroProbes,
       opencodeChecks: state.opencodeChecks,
       pendingRestart: state.pendingRestart,
@@ -301,7 +325,7 @@ function close(state: OpenState): WslMachineTransition {
 
 // A second host request while one runs joins it: the dialog asks again once the state shows the host idle.
 function hostRequested(state: OpenState, event: { attempt: string; job: WslHostJob }) {
-  if (state.host.status === "busy") return next(state, [resolve(event.attempt)])
+  if (state.host.status !== "idle") return next(state, [resolve(event.attempt)])
 
   return next({ ...state, host: { status: "busy", attempt: event.attempt } }, [
     { type: "host", attempt: event.attempt, job: event.job },
@@ -374,7 +398,6 @@ function distroInstalled(
     distro: string
     attempt: string
     installed: readonly WslInstalledDistro[]
-    online: readonly WslOnlineDistro[]
     probe: WslDistroProbe
   },
 ) {
@@ -385,7 +408,6 @@ function distroInstalled(
   const installed = {
     ...state,
     installed: event.installed,
-    online: event.online,
     distroProbes: { ...state.distroProbes, [event.distro]: event.probe },
   }
 

@@ -33,6 +33,8 @@ export function mount(input: {
   distros?: string | null
   /** Holds the distribution refresh job while inspecting disabled dialog controls. */
   busy?: string | null
+  /** Keeps the online catalog pending after the installed list has arrived. */
+  catalog?: string | null
   /** Enables the updater Ipc; check and install reject with this message, which may be empty. */
   updater?: string | null
 }) {
@@ -90,17 +92,18 @@ export function mount(input: {
       state: {
         runtime: { available: true, version: "2", error: null },
         installed: distros.map((name) => ({ name, version: name === "Debian-WSL1" ? 1 : 2, isDefault: false })),
-        online: distros.length
-          ? ["Debian", "FedoraLinux-43", "openSUSE-Tumbleweed", "OracleLinux_9_1", "kali-linux"].map((name) => ({
-              name,
-              label: name,
-            }))
-          : [],
+        online:
+          distros.length && !input.catalog
+            ? ["Debian", "FedoraLinux-43", "openSUSE-Tumbleweed", "OracleLinux_9_1", "kali-linux"].map((name) => ({
+                name,
+                label: name,
+              }))
+            : [],
         distroProbes: Object.fromEntries(
           distros.map((name) => [name, { name, canExecute: true, hasBash: true, hasCurl: true, error: null }]),
         ),
         pendingRestart: false,
-        hostJob: input.busy ? "busy" : "idle",
+        hostJob: input.catalog ? "catalog" : input.busy ? "busy" : "idle",
         distroJobs: {},
         servers: [
           {
@@ -160,6 +163,10 @@ export function mount(input: {
       }))
 
     const wsl = {
+      refreshDistros() {
+        setStore("calls", (calls) => [...calls, "refresh"])
+        setStore("state", { hostJob: "catalog", catalogError: null })
+      },
       // Like main: stops the distro's server, updates OpenCode, then starts the server again on a new endpoint.
       installOpencode(value) {
         const name = value.name ?? ""
@@ -170,7 +177,12 @@ export function mount(input: {
         setStore("state", (state) => ({
           opencodeChecks: {
             ...state.opencodeChecks,
-            [name]: { ...state.opencodeChecks[name]!, version: "current", matchesDesktop: true },
+            [name]: {
+              ...state.opencodeChecks[name]!,
+              resolvedPath: "/usr/bin/opencode",
+              version: "current",
+              matchesDesktop: true,
+            },
           },
         }))
         endpoint.url = input.restart ?? endpoint.url
@@ -305,6 +317,32 @@ export function mount(input: {
         <AppBaseProviders locale="en">
           <div>
             <output aria-label="WSL actions">{store.calls.join(",")}</output>
+            <Show when={input.catalog}>
+              <button
+                type="button"
+                data-testid="fail-wsl-catalog"
+                onClick={() => {
+                  setStore("state", { hostJob: "idle", catalogError: "catalog offline" })
+                  publish("wsl")
+                }}
+              >
+                Fail WSL catalog
+              </button>
+              <button
+                type="button"
+                data-testid="complete-wsl-catalog"
+                onClick={() => {
+                  setStore("state", {
+                    hostJob: "idle",
+                    catalogError: null,
+                    online: [{ name: "Debian", label: "Debian" }],
+                  })
+                  publish("wsl")
+                }}
+              >
+                Complete WSL catalog
+              </button>
+            </Show>
             {/* The WSL plugin's main side going away, as on a reload or failure, and coming back. */}
             <label>
               <input

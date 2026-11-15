@@ -6,6 +6,51 @@ import { expectSessionTitle } from "../utils/waits"
 
 test.use({ viewport: { width: 1280, height: 900 } })
 
+test("adding an installed WSL distro remains available while the catalog loads, fails and retries", async ({
+  page,
+}) => {
+  await mockOpenCodeServer(page, {
+    directory: "/repo",
+    project: project({ id: "proj_wsl_offline", directory: "/repo", name: "WSL project" }),
+    provider: NO_PROVIDER,
+    sessions: [],
+    pageMessages: () => ({ items: [] }),
+  })
+  await page.goto(
+    `/e2e/utils/settings-wsl.html?${new URLSearchParams({
+      server: SERVER,
+      mode: "ready",
+      distros: "ArchLinux-Dev,CentOS7-Service",
+      catalog: "pending",
+    })}`,
+  )
+  const settings = page.getByTestId("settings-screen")
+  await settings.getByRole("tab", { name: "Servers", exact: true }).click()
+  await settings.getByRole("button", { name: "Add server", exact: true }).press("Enter")
+  await page.getByRole("menuitem", { name: "Add WSL server", exact: true }).click()
+  const dialog = page.getByRole("dialog")
+  const arch = dialog.getByRole("radio", { name: "ArchLinux-Dev OpenCode not installed", exact: true })
+  await expect(arch).toBeEnabled()
+  await expect(arch).toBeChecked()
+  await expect(dialog.getByRole("button", { name: "Check again", exact: true })).toBeDisabled()
+  await dialog.getByRole("button", { name: "Install OpenCode", exact: true }).click()
+  const add = dialog.getByRole("button", { name: "Add WSL server", exact: true })
+  await expect(add).toBeEnabled()
+
+  // These fixture controls deliver main-process state changes while the modal is open.
+  await page.getByTestId("fail-wsl-catalog").dispatchEvent("click")
+  await expect(dialog.getByRole("alert")).toHaveText("Failed to list online WSL distros: catalog offline")
+  await expect(dialog.getByRole("radio", { name: "ArchLinux-Dev Ready", exact: true })).toBeChecked()
+  await expect(add).toBeEnabled()
+  await dialog.getByRole("button", { name: "Check again", exact: true }).click()
+  await expect(page.getByLabel("WSL actions")).toContainText("refresh")
+  await expect(dialog.getByRole("alert")).toHaveCount(0)
+  await expect(add).toBeEnabled()
+  await page.getByTestId("complete-wsl-catalog").dispatchEvent("click")
+  await expect(dialog.getByRole("button", { name: /Need another distro/ })).toBeEnabled()
+  await expect(add).toBeEnabled()
+})
+
 test("WSL distribution radios stay inset and aligned in both add-server lists", async ({ page }) => {
   await mockOpenCodeServer(page, {
     directory: "/repo",

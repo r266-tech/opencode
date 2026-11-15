@@ -290,6 +290,51 @@ describe("removal and shutdown", () => {
 })
 
 describe("host jobs", () => {
+  test("catalog outcomes cannot replace local data or finish a different host attempt", () => {
+    const installed = [{ name: "ArchLinux-Dev", version: 2, isDefault: true }]
+
+    const loading = play(
+      createWslMachineState([]),
+      { type: "host", attempt: "h1", job: "refresh-distros" },
+      { type: "distros.listed", attempt: "h1", installed },
+    ).state
+
+    expect(toServersState(loading)).toMatchObject({ installed, hostJob: "catalog" })
+
+    const stale = transitionWslMachine(loading, { type: "catalog.failed", attempt: "h0", message: "stale" })
+    expect(stale.state).toBe(loading)
+    expect(stale.effects).toEqual([])
+
+    const failed = transitionWslMachine(loading, { type: "catalog.failed", attempt: "h1", message: "offline" })
+    expect(toServersState(failed.state)).toMatchObject({ installed, catalogError: "offline", hostJob: "idle" })
+    expect(failed.effects).toEqual([
+      { type: "log", level: "error", message: "wsl catalog refresh failed", data: { message: "offline" } },
+    ])
+
+    const retry = play(
+      failed.state,
+      { type: "host", attempt: "h2", job: "refresh-distros" },
+      { type: "distros.listed", attempt: "h2", installed },
+    ).state
+
+    expect(toServersState(retry)).toMatchObject({ installed, catalogError: null, hostJob: "catalog" })
+    expect(
+      transitionWslMachine(retry, {
+        type: "catalog.listed",
+        attempt: "h1",
+        online: [{ name: "stale", label: "stale" }],
+      }).state,
+    ).toBe(retry)
+
+    const online = [{ name: "Debian", label: "Debian" }]
+    const ready = transitionWslMachine(retry, { type: "catalog.listed", attempt: "h2", online })
+    expect(toServersState(ready.state)).toMatchObject({ installed, online, catalogError: null, hostJob: "idle" })
+    expect(ready.effects).toEqual([])
+
+    const closed = transitionWslMachine(retry, { type: "close" }).state
+    expect(transitionWslMachine(closed, { type: "catalog.listed", attempt: "h2", online }).state).toBe(closed)
+  })
+
   test("a second host request joins the running one, and its result settles only the matching attempt", () => {
     const runtime = { available: true, version: "2", error: null }
 

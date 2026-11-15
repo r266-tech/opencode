@@ -149,7 +149,12 @@ export function DialogAddWslServer(props: DialogWslServerProps) {
             <DialogBody class="settings-wsl-dialog-body">
               <div class="settings-wsl-section-header">
                 <span class="settings-wsl-section-title">{language.t("onboarding.installedDistros")}</span>
-                <Button variant="ghost-muted" size="small" disabled={model().busy} onClick={controller.refreshDistros}>
+                <Button
+                  variant="ghost-muted"
+                  size="small"
+                  disabled={model().busy || model().refreshingCatalog}
+                  onClick={controller.refreshDistros}
+                >
                   {language.t("onboarding.checkAgain")}
                 </Button>
               </div>
@@ -200,6 +205,14 @@ export function DialogAddWslServer(props: DialogWslServerProps) {
                     </For>
                   </RadioGroup>
                 </div>
+              </Show>
+
+              <Show when={model().catalogError}>
+                {(error) => (
+                  <div role="alert" class="settings-wsl-distro-empty">
+                    {language.t("error.listOnline")}: {error()}
+                  </div>
+                )}
               </Show>
 
               <Show when={model().installableDistros.length > 0}>

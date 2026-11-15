@@ -129,16 +129,21 @@ export function createWslServersController(options: WslServersControllerOptions)
     return cliCheck(t, distro, resolved, version, options.cli.version)
   }
 
-  const listDistros = async () => {
-    const [installed, online] = await Promise.all([runtime.listInstalled(), runtime.listOnline()])
-
-    return { installed, online }
-  }
-
   const hostJob = async (job: WslHostJob, attempt: string): Promise<WslMachineEvent> => {
     if (job === "probe-runtime") return { type: "runtime.probed", attempt, runtime: await runtime.probeRuntime() }
 
-    if (job === "refresh-distros") return { type: "distros.listed", attempt, ...(await listDistros()) }
+    if (job === "refresh-distros") {
+      const catalog = runtime.listOnline().then(
+        (online) => ({ type: "catalog.listed" as const, attempt, online }),
+        (error) => ({ type: "catalog.failed" as const, attempt, message: message(error) }),
+      )
+
+      const installed = await runtime.listInstalled()
+      dispatch({ type: "distros.listed", attempt, installed })
+
+      return catalog
+    }
+
     await runtime.installRuntimeElevated()
 
     return { type: "runtime.installed", attempt, runtime: await runtime.probeRuntime() }
@@ -159,9 +164,14 @@ export function createWslServersController(options: WslServersControllerOptions)
 
     if (effect.type === "install-distro") {
       await runtime.installDistro(distro)
-      const lists = await listDistros()
 
-      return { type: "distro.installed", distro, attempt, ...lists, probe: await runtime.probeDistro(distro) }
+      return {
+        type: "distro.installed",
+        distro,
+        attempt,
+        installed: await runtime.listInstalled(),
+        probe: await runtime.probeDistro(distro),
+      }
     }
 
     await options.installCli(distro, options.cli)

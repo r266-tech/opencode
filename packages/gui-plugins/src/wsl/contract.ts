@@ -72,11 +72,12 @@ export const WslServersState = Schema.Struct({
   runtime: Schema.NullOr(WslRuntimeCheck),
   installed: Schema.Array(WslInstalledDistro),
   online: Schema.Array(WslOnlineDistro),
+  catalogError: Schema.optionalKey(Schema.NullOr(Schema.String)),
   distroProbes: Schema.Record(Schema.String, WslDistroProbe),
   opencodeChecks: Schema.Record(Schema.String, WslOpencodeCheck),
   pendingRestart: Schema.Boolean,
   servers: Schema.Array(WslServerItem),
-  hostJob: Schema.Literals(["idle", "busy"]),
+  hostJob: Schema.Literals(["idle", "busy", "catalog"]),
   distroJobs: Schema.Record(Schema.String, WslDistroJob),
 })
 
