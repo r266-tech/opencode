@@ -69,6 +69,7 @@ export const Plugin = define({
           if (!inherit) continue
           providers.models.update(providerID, id, (model) => {
             if (base) Object.assign(model, structuredClone(base))
+            if (config.modelID !== undefined) model.modelID = config.modelID
             if (item.package !== undefined) model.package = undefined
           })
         }
@@ -113,7 +114,7 @@ export const Plugin = define({
             providerID,
             id,
             config,
-            inherit && source?.base ? { base: source.base } : undefined,
+            inherit ? { base: source?.base } : undefined,
           )
           // Inherited variants are spelled for the base model's package, so a package override needs fresh ones.
           // A base without variants has no reasoning support to respell.

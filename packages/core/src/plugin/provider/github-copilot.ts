@@ -292,6 +292,18 @@ export const GithubCopilotPlugin = define({
       }
     })
     yield* ctx.model.transform((models) => {
+      // Config adds models after the provider transforms. Route those without a catalog template too;
+      // explicit config overrides still apply after this model transform.
+      const loaded = discovered.current
+      const url = loaded.baseURL ?? (typeof login.settings.baseURL === "string" ? login.settings.baseURL : baseURL())
+      for (const model of models.list(Provider.ID.githubCopilot)) {
+        if (model.package) continue
+        const route = CopilotModels.routeFor(model.modelID ?? model.id, undefined, url)
+        models.update(Provider.ID.githubCopilot, model.id, (draft) => {
+          draft.package = route.package
+          draft.settings = Provider.mergeOverlay(draft.settings, { baseURL: route.baseURL })
+        })
+      }
       if (models.get(Provider.ID.githubCopilot, Model.ID.make("gpt-5-chat-latest"))) {
         models.update(Provider.ID.githubCopilot, Model.ID.make("gpt-5-chat-latest"), (model) => {
           // This chat-only alias conflicts with the Copilot GPT-5 Responses route,

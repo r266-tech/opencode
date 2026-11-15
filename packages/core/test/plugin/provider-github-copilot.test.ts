@@ -2,8 +2,11 @@ import { App } from "@opencode/core/app"
 import { Agent } from "@opencode/schema/agent"
 import { Session } from "@opencode/core/session"
 import { Location } from "@opencode/core/location"
+import { Config } from "@opencode/core/config"
+import { ConfigProviderPlugin } from "@opencode/core/config/plugin/provider"
+import { Document, Info } from "@opencode/schema/config"
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Deferred, Effect, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http"
 import { TestClock } from "effect/testing"
 import { Model } from "@opencode/core/model"
@@ -22,6 +25,7 @@ import { Provider } from "@opencode/core/provider"
 import { Integration } from "@opencode/core/integration"
 import { Credential } from "@opencode/core/credential"
 import { advance, drain } from "../lib/clock"
+import { eventually } from "../lib/eventually"
 import type { SessionRequestKind } from "@opencode/plugin/effect/session"
 import { testEffect } from "../lib/effect"
 import { PluginTestLayer } from "./fixture"
@@ -237,6 +241,142 @@ describe("GithubCopilotPlugin", () => {
       ).toBe("https://api.tenant.ghe.com")
     }),
   )
+
+  for (const override of [
+    { name: "defaults", value: {} },
+    { name: "provider URL", value: { settings: { baseURL: "https://configured.example/proxy" } } },
+    {
+      name: "provider package and URL",
+      value: {
+        package: "@opencode/ai/providers/openai-compatible-responses",
+        settings: { baseURL: "https://configured.example/proxy" },
+      },
+    },
+  ])
+    it.effect(`routes config-only Copilot models before discovery finishes with ${override.name}`, () =>
+      Effect.gen(function* () {
+        const models = yield* Model.Service
+        const providers = yield* Provider.Service
+        const plugin = yield* Plugin.Service
+        const started = yield* Deferred.make<void>()
+        const discovery = yield* Deferred.make<void>()
+        yield* providers.transform((editor) => {
+          editor.update(Provider.ID.githubCopilot, (provider) => {
+            provider.package = "@opencode/ai/providers/openai/responses"
+            provider.settings = { baseURL: "https://api.githubcopilot.com" }
+          })
+        })
+        yield* connect({ apiEndpoint: "https://api.tenant.ghe.com" })
+        yield* addPlugin().pipe(
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make((request) =>
+              request.url.endsWith("/copilot_internal/user")
+                ? Effect.succeed(
+                    HttpClientResponse.fromWeb(
+                      request,
+                      Response.json({ endpoints: { api: "https://api.tenant.ghe.com" } }),
+                    ),
+                  )
+                : Deferred.succeed(started, undefined).pipe(
+                    Effect.andThen(Deferred.await(discovery)),
+                    Effect.as(
+                      HttpClientResponse.fromWeb(
+                        request,
+                        Response.json({
+                          data: [
+                            {
+                              id: "gemini-4-hydrogen",
+                              name: "Gemini 4 Hydrogen",
+                              version: "gemini-4-hydrogen",
+                              model_picker_enabled: true,
+                              supported_endpoints: ["/responses"],
+                              capabilities: {
+                                family: "gemini-4",
+                                limits: { max_output_tokens: 8192, max_prompt_tokens: 120000 },
+                                supports: { tool_calls: true },
+                              },
+                            },
+                          ],
+                        }),
+                      ),
+                    ),
+                  ),
+            ),
+          ),
+        )
+        yield* Deferred.await(started)
+        const host = yield* PluginHost.make(plugin, "config")
+        yield* ConfigProviderPlugin.Plugin.effect(host).pipe(
+          Effect.provide(
+            Config.testLayer([
+              new Document({
+                type: "document",
+                info: Schema.decodeUnknownSync(Info)({
+                  providers: {
+                    "github-copilot": {
+                      ...override.value,
+                      models: {
+                        "gemini-4-hydrogen": { settings: { reasoningEffort: "low" } },
+                        fast: { modelID: "gpt-5-future" },
+                        manual: {
+                          modelID: "gemini-4-hydrogen",
+                          package: "@opencode/ai/providers/openai-compatible-responses",
+                          settings: { baseURL: "https://model.example/proxy" },
+                        },
+                      },
+                    },
+                  },
+                }),
+              }),
+            ]),
+          ),
+        )
+        for (const expected of [
+          {
+            id: "gemini-4-hydrogen",
+            modelID: "gemini-4-hydrogen",
+            package: "@opencode/ai/providers/openai-compatible",
+            baseURL: "https://api.tenant.ghe.com",
+          },
+          {
+            id: "fast",
+            modelID: "gpt-5-future",
+            package: "@opencode/ai/providers/openai-compatible-responses",
+            baseURL: "https://api.tenant.ghe.com",
+          },
+        ]) {
+          const model = required(yield* models.get(Provider.ID.githubCopilot, Model.ID.make(expected.id)))
+          expect({ modelID: model.modelID, package: model.package, baseURL: model.settings?.baseURL }).toEqual({
+              modelID: Model.ID.make(expected.modelID),
+            package: override.value.package ?? expected.package,
+            baseURL: override.value.settings?.baseURL ?? expected.baseURL,
+          })
+        }
+        const model = required(yield* models.get(Provider.ID.githubCopilot, Model.ID.make("manual")))
+        expect({ package: model.package, baseURL: model.settings?.baseURL }).toEqual({
+          package: "@opencode/ai/providers/openai-compatible-responses",
+          baseURL: "https://model.example/proxy",
+        })
+        expect(
+          required(yield* models.get(Provider.ID.githubCopilot, Model.ID.make("gemini-4-hydrogen"))).settings
+            ?.reasoningEffort,
+        ).toBe("low")
+        if (override.name !== "defaults") return
+        const resolved = yield* ModelResolver.fromCatalogModel(
+          required(yield* models.get(Provider.ID.githubCopilot, Model.ID.make("gemini-4-hydrogen"))),
+        )
+        expect(resolved.route.id).toBe("openai-compatible-chat")
+
+        // Once discovery completes, its advertised endpoint replaces the model-ID fallback.
+        yield* Deferred.succeed(discovery, undefined)
+        const refreshed = yield* eventually(
+          models.get(Provider.ID.githubCopilot, Model.ID.make("gemini-4-hydrogen")),
+          (model) => model?.package === "@opencode/ai/providers/openai-compatible-responses",
+        )
+        expect(refreshed?.settings).toMatchObject({ baseURL: "https://api.tenant.ghe.com", reasoningEffort: "low" })
+      }),
+    )
 
   it.effect("registers GitHub Copilot device OAuth", () =>
     Effect.gen(function* () {
