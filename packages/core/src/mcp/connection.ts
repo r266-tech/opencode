@@ -2,7 +2,7 @@ export * as McpConnection from "./connection.js"
 
 import type { AuthProvider } from "@modelcontextprotocol/client"
 import type { Mcp } from "@opencode/schema/mcp"
-import { Cause, Effect, Exit, Scope } from "effect"
+import { Cause, Effect, Exit, Fiber, Scope } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { Environment } from "../environment/index.js"
 import { KeyedMutex } from "../effect/keyed-mutex.js"
@@ -65,7 +65,7 @@ export interface Input {
   /** Serializes lifecycle work. Callbacks and recovery take it; `start` and `stop` expect the caller to hold it. */
   readonly lock: <A, E>(effect: Effect.Effect<A, E>) => Effect.Effect<A, E>
   /** Runs callbacks from the live connection. */
-  readonly callbacks: (effect: Effect.Effect<void>) => unknown
+  readonly callbacks: (effect: Effect.Effect<void>) => Fiber.Fiber<void>
   /** Runs recovery that a background request triggered. */
   readonly fork: (effect: Effect.Effect<void>) => unknown
   readonly events: Events
@@ -102,6 +102,7 @@ export function make(input: Input): Connection {
     client?: McpClient.Connection
     tools?: ReadonlyArray<McpClient.Tool>
     prompts?: ReadonlyArray<McpClient.Prompt>
+    toolsRefresh?: Fiber.Fiber<void>
   } = {}
 
   // Runs a connection callback under the lock, dropping it if the connection is no longer the live
@@ -148,6 +149,9 @@ export function make(input: Input): Connection {
         (error) => "_tag" in error && error._tag === "MCP.SessionExpiredError",
         (error) => recover(client).pipe(Effect.flatMap(() => (state.client ? run(state.client) : Effect.fail(error)))),
       ),
+      // Finish tool changes already announced before the response, so the next model step sees them.
+      // Unrelated callbacks, such as prompt discovery, must not delay a successful request.
+      Effect.tap(() => (state.toolsRefresh ? Fiber.await(state.toolsRefresh) : Effect.void)),
     )
 
   const watch = (client: McpClient.Connection) => {
@@ -156,7 +160,10 @@ export function make(input: Input): Connection {
     // Background refreshes (list-changed) can observe the expiry too; they do not retry, so
     // reconnect here for them. Foreground calls reconnect through `recovering`.
     client.onSessionExpired(() => input.fork(recover(client)))
-    client.onToolsChanged(() => live(refreshTools(client).pipe(Effect.andThen(input.events.changed("tools")))))
+    client.onToolsChanged(() => {
+      if (state.client !== client) return
+      state.toolsRefresh = live(refreshTools(client).pipe(Effect.andThen(input.events.changed("tools"))))
+    })
     client.onPromptsChanged(() => live(refreshPrompts(client)))
     client.onResourcesChanged(() => live(input.events.changed("resources")))
   }
@@ -236,6 +243,7 @@ export function make(input: Input): Connection {
     state.client = undefined
     state.tools = undefined
     state.prompts = undefined
+    state.toolsRefresh = undefined
     yield* Scope.close(scope, Exit.void)
     yield* input.events.changed("tools")
     yield* input.events.changed("resources")

@@ -2766,13 +2766,89 @@ const gatedServer = Effect.gen(function* () {
 })
 
 // The real Mcp layer behind the tool registry; the bus never delivers, so only flush can register tools.
-const startupRegistry = (url: string) =>
+const startupRegistry = (server: string | typeof ConfigMCP.Server.Type) =>
   AppNodeBuilder.build(LayerNode.group([Mcp.node, Tool.node, McpTool.node]), [
     ...toolNodeReplacements(permissions),
-    Mcp.node.replace(resourceMcpLayer(new ConfigMCP.Remote({ type: "remote", url, oauth: false, codemode: false }))),
+    Mcp.node.replace(
+      resourceMcpLayer(
+        typeof server === "string"
+          ? new ConfigMCP.Remote({ type: "remote", url: server, oauth: false, codemode: false })
+          : server,
+      ),
+    ),
     Bus.node.replace(events),
     Global.node.replace(Global.layerWith({ data: outputData })),
   ])
+
+testEffect(Layer.empty).live("does not wait for unrelated MCP prompt discovery after a tool call", () =>
+  Effect.gen(function* () {
+    const started = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    const server = yield* resourceServer({
+      respond: async (request) => {
+        if (request.method !== "POST") return undefined
+        const body: unknown = await request.clone().json()
+        if (!isRecord(body) || body.method !== "prompts/list") return undefined
+        await Effect.runPromise(Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release))))
+        return undefined
+      },
+    })
+    yield* Effect.gen(function* () {
+      const service = yield* Mcp.Service
+      expect(yield* settled(service)).toEqual({ status: "connected" })
+      yield* Deferred.await(started)
+      expect(
+        yield* service
+          .callTool({ server: "resources", name: "echo", args: { text: "hello" } })
+          .pipe(Effect.timeout("5 seconds")),
+      ).toEqual({
+        isError: false,
+        content: [{ type: "text", text: "hello" }],
+        structured: undefined,
+      })
+    }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)), Effect.provide(resourceMcpLayer(server.url)))
+  }),
+)
+
+for (const codemode of [false, true])
+  testEffect(Layer.empty).live(`registers MCP tool changes before the next step (codemode=${codemode})`, () =>
+    Effect.gen(function* () {
+      const service = yield* Mcp.Service
+      const registry = yield* Tool.Service
+      const registration = yield* McpTool.Service
+      const names = Effect.gen(function* () {
+        const snapshot = yield* registry.snapshot()
+        if (!codemode) return snapshot.definitions.map((tool) => tool.name)
+        if (!snapshot.codeModeCatalog) throw new Error("Expected a Code Mode catalog")
+        return codeModeListings(snapshot.codeModeCatalog).map((tool) => tool.path)
+      })
+      const toggle = codemode ? ["resources.toggle"] : ["resources_toggle", "execute"]
+      yield* registration.flush
+      expect(yield* names).toEqual(toggle)
+
+      yield* service.callTool({ server: "resources", name: "toggle", args: { enabled: true } })
+      // SessionContext flushes immediately before taking the next model request's tool snapshot.
+      yield* registration.flush
+      expect(yield* names).toEqual([codemode ? "resources.added" : "resources_added", ...toggle])
+      expect((yield* service.callTool({ server: "resources", name: "added" })).content).toEqual([
+        { type: "text", text: "added" },
+      ])
+
+      yield* service.callTool({ server: "resources", name: "toggle", args: { enabled: false } })
+      yield* registration.flush
+      expect(yield* names).toEqual(toggle)
+    }).pipe(
+      Effect.provide(
+        startupRegistry(
+          new ConfigMCP.Local({
+            type: "local",
+            command: [process.execPath, path.join(import.meta.dir, "fixture/mcp-progressive.ts")],
+            codemode,
+          }),
+        ),
+      ),
+    ),
+  )
 
 testEffect(Layer.empty).effect("flush waits for a server that connects within its startup window", () =>
   Effect.gen(function* () {
