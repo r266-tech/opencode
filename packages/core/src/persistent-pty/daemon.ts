@@ -2,11 +2,12 @@ import { spawn } from "node:child_process"
 import { readFile } from "node:fs/promises"
 import net from "node:net"
 import path from "node:path"
-import { Cause, Data, Duration, Effect, Schema, Semaphore } from "effect"
+import { Cause, Clock, Data, Duration, Effect, Schema, Semaphore } from "effect"
 import type { Handoff } from "@opencode/schema/persistent-pty"
 
 const ProtocolVersion = 8
 const MaxFrameBytes = 8 * 1024 * 1024
+const StartRetryDelay = Duration.toNanosUnsafe("30 seconds")
 
 const Lifecycle = Schema.Union([
   Schema.Struct({ status: Schema.Literal("running") }),
@@ -209,6 +210,8 @@ export const makeDaemonTransport = Effect.fn("PersistentPty.makeDaemonTransport"
   let closed = false
   // Set once a daemon we spawned turned out to speak another protocol.
   let incompatible: DaemonError | undefined
+  // Share costly failed starts briefly; discovery still finds a daemon that recovers during the delay.
+  let unavailable: { error: DaemonError; retryAt: bigint } | undefined
   yield* Effect.addFinalizer(() =>
     Effect.sync(() => {
       closed = true
@@ -226,6 +229,7 @@ export const makeDaemonTransport = Effect.fn("PersistentPty.makeDaemonTransport"
         }
         owner = connection
         registration = current
+        unavailable = undefined
         connection.socket.once("close", () => {
           if (owner !== connection) return
           owner = undefined
@@ -321,8 +325,11 @@ export const makeDaemonTransport = Effect.fn("PersistentPty.makeDaemonTransport"
 
   // An unreachable daemon, or one left by another release, can still hold this directory's lock, so retry once in a
   // fresh directory. A binary that cannot be spawned, or that speaks another protocol, fails the same way again.
-  const start = () =>
-    spawnDaemon().pipe(
+  const start = Effect.fn("PersistentPty.daemon.start")(function* () {
+    const now = yield* Clock.monotonicTimeNanos
+    if (unavailable && now < unavailable.retryAt) return yield* Effect.fail(unavailable.error)
+
+    return yield* spawnDaemon().pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
           if (error.kind === "spawn" || error === incompatible) return yield* Effect.fail(error)
@@ -331,7 +338,13 @@ export const makeDaemonTransport = Effect.fn("PersistentPty.makeDaemonTransport"
           return yield* spawnDaemon()
         }),
       ),
+      Effect.tapError((error) =>
+        Effect.gen(function* () {
+          unavailable = { error, retryAt: (yield* Clock.monotonicTimeNanos) + StartRetryDelay }
+        }),
+      ),
     )
+  })
 
   const abandon = () => {
     owner?.socket.destroy()

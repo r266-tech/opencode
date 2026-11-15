@@ -3,10 +3,61 @@ import { spawn } from "node:child_process"
 import { mkdir, writeFile } from "node:fs/promises"
 import net from "node:net"
 import path from "node:path"
-import { Effect, Fiber } from "effect"
+import { Clock, Effect, Fiber } from "effect"
 import { makeDaemonTransport } from "../src/persistent-pty/daemon"
 import { frame, listen, pong, temporaryDirectory, terminal, writeRegistration } from "./fixture/persistent-pty-daemon"
 import { it } from "./lib/effect"
+
+it.live("backs off failed starts without blocking a recovered daemon", () =>
+  Effect.gen(function* () {
+    const { root, directory } = yield* temporaryRuntime()
+    const live = yield* Clock.Clock
+    const time = { nanos: 0n }
+    const attempts: string[] = []
+    const clock: Clock.Clock = {
+      currentTimeMillisUnsafe: () => live.currentTimeMillisUnsafe(),
+      currentTimeMillis: live.currentTimeMillis,
+      currentTimeNanosUnsafe: () => live.currentTimeNanosUnsafe(),
+      currentTimeNanos: live.currentTimeNanos,
+      monotonicTimeNanosUnsafe: () => time.nanos,
+      monotonicTimeNanos: Effect.sync(() => time.nanos),
+      sleep: (duration) => live.sleep(duration),
+    }
+    const daemon = yield* makeDaemonTransport(root, "daemon", async () => {
+      attempts.push("start")
+      throw new Error("daemon unavailable")
+    })
+    const request = daemon.request({ op: "list", mode: "pipe" }, true).pipe(Effect.flip)
+
+    yield* request.pipe(Effect.provideService(Clock.Clock, clock))
+    const failures = yield* Effect.all(
+      Array.from({ length: 4 }, () => request),
+      { concurrency: "unbounded" },
+    ).pipe(Effect.provideService(Clock.Clock, clock))
+    expect(failures.every((failure) => failure.kind === "spawn" && failure.message === "daemon unavailable")).toBe(true)
+    expect(attempts).toEqual(["start"])
+
+    time.nanos = 29_999_000_000n
+    yield* request.pipe(Effect.provideService(Clock.Clock, clock))
+    expect(attempts).toEqual(["start"])
+    time.nanos = 30_000_000_000n
+    yield* request.pipe(Effect.provideService(Clock.Clock, clock))
+    expect(attempts).toEqual(["start", "start"])
+
+    const socketPath = path.join(directory, "daemon.sock")
+    yield* listen(socketPath, (_socket, value) => (value.op === "ping" ? pong : { type: "processes", processes: [] }))
+    yield* Effect.promise(() => writeRegistration(directory, socketPath))
+    expect(yield* daemon.requestIfRunning({ op: "list" }).pipe(Effect.provideService(Clock.Clock, clock))).toEqual({
+      type: "processes",
+      processes: [],
+    })
+    expect(yield* daemon.request({ op: "list" }, true).pipe(Effect.provideService(Clock.Clock, clock))).toEqual({
+      type: "processes",
+      processes: [],
+    })
+    expect(attempts).toEqual(["start", "start"])
+  }),
+)
 
 it.live("rediscovers a same-protocol daemon after its registration rotates", () =>
   Effect.gen(function* () {
