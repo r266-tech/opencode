@@ -604,6 +604,9 @@ function startServer(options: WireOptions, changed: () => void) {
   const mcp: Array<{ readonly name: string; readonly directory?: string; readonly config: unknown }> = []
   const fake = {
     requests,
+    get eventStreams() {
+      return streams.size
+    },
     catalog,
     sessions: new Map<string, SessionInfo>(),
     messages: new Map<string, SessionMessageInfo[]>(),
@@ -722,6 +725,7 @@ function startServer(options: WireOptions, changed: () => void) {
               },
               cancel() {
                 if (state.stream) streams.delete(state.stream)
+                changed()
               },
             }),
             { headers: { "content-type": "text/event-stream" } },

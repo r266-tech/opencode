@@ -53,6 +53,7 @@ export type TurnState = {
   readonly compactions: ACPCompaction.Tracked
   readonly children: ReadonlyMap<string, Child>
   readonly openChildren: ReadonlySet<string>
+  readonly hasBackgroundShells: boolean
   readonly asks: ReadonlySet<string>
   readonly finish?: SessionMessage.Assistant["finish"]
   readonly usage?: { readonly turn: TokenUsage.Info; readonly last: TokenUsage.Info }
@@ -89,6 +90,7 @@ export const initial: TurnState = {
   compactions: new Map(),
   children: new Map(),
   openChildren: new Set(),
+  hasBackgroundShells: false,
   asks: new Set(),
 }
 
@@ -384,7 +386,13 @@ function sessionEvent(state: TurnState, event: OpenCodeEvent, ctx: TurnContext, 
       const key = toolKey(event.data.sessionID, event.data.id)
       const tool = state.tools.get(key) ?? newTool(event.data.sessionID, event.data.id)
       return {
-        state: { ...state, tools: without(state.tools, key) },
+        state: {
+          ...state,
+          tools: without(state.tools, key),
+          hasBackgroundShells:
+            state.hasBackgroundShells ||
+            (!child && event.data.metadata?.status === "running" && typeof event.data.metadata.shellID === "string"),
+        },
         outputs: send({
           sessionUpdate: "tool_call_update",
           ...completedToolUpdate({

@@ -93,6 +93,7 @@ export const make = Effect.fnUntraced(function* (input: {
         ...ACPTranslate.initial,
         children: inherited.children,
         openChildren: inherited.openChildren,
+        hasBackgroundShells: inherited.hasBackgroundShells,
       })
     }
     // Parented to the service scope; the session scope may already be closed.
@@ -239,10 +240,30 @@ export const make = Effect.fnUntraced(function* (input: {
     }
   })
 
-  const followChildren = Effect.fnUntraced(function* (turn: Turn) {
+  const hasBackgroundWork = Effect.fnUntraced(
+    function* (turn: Turn, state: ACPTranslate.TurnState) {
+      if (state.openChildren.size > 0) return true
+      if (!state.hasBackgroundShells) return false
+      const sessionID = turn.ctx.sessionID
+      // Completion moves job -> inbox -> active; read in that order so the handoff cannot miss it.
+      if ((yield* input.client.experimental.job.list({ sessionID })).length > 0) return true
+      if ((yield* input.client.session.inbox.list({ sessionID })).length > 0) return true
+      if ((yield* input.client.session.active())[sessionID]) return true
+      yield* Ref.update(turn.state, (current) => ({ ...current, hasBackgroundShells: false }))
+      return false
+    },
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.interrupt
+        : Effect.logWarning("ACP background work lookup failed", cause).pipe(Effect.as(true)),
+    ),
+  )
+
+  const followBackground = Effect.fnUntraced(function* (turn: Turn) {
     while (true) {
       const folded = yield* advance(turn)
-      if (folded.terminal && folded.state.openChildren.size === 0) return yield* asksSettled(turn.subscription)
+      if (folded.terminal && !(yield* hasBackgroundWork(turn, folded.state)))
+        return yield* asksSettled(turn.subscription)
     }
   })
 
@@ -328,19 +349,19 @@ export const make = Effect.fnUntraced(function* (input: {
     const close = Scope.close(turn.subscription.scope, Exit.void)
     if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)) return yield* close
     const state = yield* Ref.get(turn.state)
-    if (state.openChildren.size === 0) {
+    if (!(yield* hasBackgroundWork(turn, state))) {
       if (state.children.size > 0) backgrounds.set(attached, { state: turn.state })
       return yield* close
     }
     const responded = yield* ACPConnection.Responded
     const nextState = yield* Ref.make({ ...state, started: false })
     const cancelled = yield* Deferred.make<void>()
-    // Children outlive a cancelled turn, so their asks and report-triggered turns still reach the client.
+    // Background work outlives a prompt, so its asks and resumed output still reach the client.
     const background = Effect.withFiber((fiber) => {
       backgrounds.set(attached, { state: nextState, fiber })
       return Effect.exit(responded).pipe(
         Effect.andThen(
-          followChildren({ ...turn, ctx: { ...turn.ctx, start: undefined }, state: nextState, cancelled }),
+          followBackground({ ...turn, ctx: { ...turn.ctx, start: undefined }, state: nextState, cancelled }),
         ),
         Effect.interruptible,
       )

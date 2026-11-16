@@ -193,6 +193,93 @@ describe("acp turn events over the wire", () => {
     ])
   })
 
+  test.each(["job", "inbox", "active", "unavailable"] as const)(
+    "streams a background shell response while its completion is in %s",
+    async (phase) => {
+      let pending = true
+      let owner = ""
+      await using acp = await startSession({
+        fetch(request) {
+          const sessionID = owner
+          if (pending && phase === "unavailable" && request.path === "/api/experimental/job")
+            return new Response(null, { status: 503 })
+          if (request.path === "/api/experimental/job")
+            return Response.json({
+              data:
+                pending && phase === "job"
+                  ? [
+                      {
+                        kind: "shell",
+                        id: "sh_background",
+                        shellID: "sh_background",
+                        sessionID,
+                        command: "build",
+                        status: "running",
+                        time: { started: 1 },
+                      },
+                    ]
+                  : [],
+            })
+          if (request.path === `/api/session/${sessionID}/inbox`)
+            return Response.json({
+              data:
+                pending && phase === "inbox"
+                  ? [
+                      {
+                        id: "msg_shell_notice",
+                        sessionID,
+                        type: "synthetic",
+                        payload: { text: "completed" },
+                        delivery: "steer",
+                        time: { created: 2 },
+                      },
+                    ]
+                  : [],
+            })
+          if (request.path === "/api/session/active")
+            return Response.json({ data: pending && phase === "active" ? { [sessionID]: { type: "running" } } : {} })
+        },
+        onPrompt: ({ sessionID, id, text }) => {
+          owner = sessionID
+          if (text === "chat") return turn(sessionID, id, textDelta(sessionID, "msg_chat", "chat reply"))
+          return turn(
+            sessionID,
+            id,
+            toolStarted(sessionID, "call_shell", "shell"),
+            toolCalled(sessionID, "call_shell", { command: "build", background: true }),
+            toolSucceeded(sessionID, "call_shell", { shellID: "sh_background", status: "running" }, "backgrounded"),
+          )
+        },
+      })
+      const idleStreams = acp.server.eventStreams
+      expect((await acp.prompt(acp.sessionId, "launch")).stopReason).toBe("end_turn")
+      expect((await acp.prompt(acp.sessionId, "chat")).stopReason).toBe("end_turn")
+      pending = false
+      acp.server.send(
+        ...turn(acp.sessionId, "msg_shell_notice", textDelta(acp.sessionId, "msg_reaction", "shell reaction")),
+      )
+      await acp.waitForUpdate(({ update }) => JSON.stringify(update).includes("shell reaction"))
+      await acp.until(() => acp.server.eventStreams === idleStreams, "background subscription cleanup")
+    },
+  )
+
+  test("closes an ordinary turn without metadata or background lookups", async () => {
+    await using acp = await startSession({
+      onPrompt: ({ sessionID, id }) =>
+        turn(
+          sessionID,
+          id,
+          toolStarted(sessionID, "call_read", "read"),
+          toolCalled(sessionID, "call_read", {}),
+          toolSucceeded(sessionID, "call_read", undefined, "finished"),
+        ),
+    })
+    const idleStreams = acp.server.eventStreams
+    expect((await acp.prompt(acp.sessionId, "read")).stopReason).toBe("end_turn")
+    await acp.until(() => acp.server.eventStreams === idleStreams, "ordinary subscription cleanup")
+    expect(acp.server.requests.filter((request) => request.path === "/api/experimental/job")).toHaveLength(0)
+  })
+
   test("cancels unsupported session forms so execution can continue", async () => {
     await using acp = await startSession({
       onPrompt: ({ sessionID, id }) => [
@@ -230,7 +317,9 @@ describe("acp turn events over the wire", () => {
 
     acp.server.active.add(acp.sessionId)
     expect(await steer()).toEqual({ outcome: "injected" })
-    expect(acp.server.prompts).toEqual([expect.objectContaining({ text: "redirect", delivery: "steer", resume: false })])
+    expect(acp.server.prompts).toEqual([
+      expect.objectContaining({ text: "redirect", delivery: "steer", resume: false }),
+    ])
   })
 })
 
