@@ -1,12 +1,96 @@
 /** @jsxImportSource @opentui/solid */
 import type { KeymapCommand } from "@opencode/plugin/tui/context"
+import { TextareaRenderable } from "@opentui/core"
 import { useKeymap } from "@opentui/keymap/solid"
 import { testRender } from "@opentui/solid"
 import { expect, test } from "bun:test"
 import { createSignal } from "solid-js"
-import { ConfigProvider } from "../src/config"
+import { ConfigProvider, useConfig, type Info } from "../src/config"
 import { Keymap } from "../src/context/keymap"
 import { createTuiResolvedConfig } from "./fixture/tui-runtime"
+
+test("textarea bindings follow config additions, changes and removal", async () => {
+  let current: Info = {}
+  let config!: ReturnType<typeof useConfig>
+  let input!: TextareaRenderable
+  let commands = 0
+
+  function Harness() {
+    config = useConfig()
+    Keymap.createLayer(() => ({ commands: [{ bind: "ctrl+a", run: () => void commands++ }] }))
+    return <textarea ref={(value) => (input = value)} height={4} />
+  }
+
+  const app = await testRender(
+    () => (
+      <ConfigProvider
+        config={createTuiResolvedConfig()}
+        service={{
+          get: async () => current,
+          update: async (update) => {
+            const draft = structuredClone(current)
+            update(draft)
+            current = draft
+            return draft
+          },
+        }}
+      >
+        <Keymap.Provider>
+          <Harness />
+        </Keymap.Provider>
+      </ConfigProvider>
+    ),
+    { width: 40, height: 8, kittyKeyboard: true },
+  )
+  try {
+    input.focus()
+    input.setText("aaa\nbbbccc")
+    input.cursorOffset = 7
+    app.mockInput.pressKey("HOME")
+    expect(input.cursorOffset).toBe(0)
+    app.mockInput.pressKey("a", { ctrl: true })
+    expect(commands).toBe(1)
+
+    await config.update((draft) => {
+      draft.keybinds = {
+        "input.line.home": ["home", "ctrl+a"],
+        "input.line.end": ["end", "ctrl+e"],
+        "input.buffer.home": "ctrl+home",
+        "input.buffer.end": "ctrl+end",
+      }
+    })
+    input.cursorOffset = 7
+    app.mockInput.pressKey("HOME")
+    expect(input.cursorOffset).toBe(4)
+    input.cursorOffset = 1
+    app.mockInput.pressKey("END")
+    expect(input.cursorOffset).toBe(3)
+    app.mockInput.pressKey("END", { ctrl: true })
+    expect(input.cursorOffset).toBe(10)
+    app.mockInput.pressKey("HOME", { ctrl: true })
+    expect(input.cursorOffset).toBe(0)
+    app.mockInput.pressKey("a", { ctrl: true })
+    expect(commands).toBe(2)
+
+    await config.update((draft) => {
+      draft.keybinds = { "input.buffer.end": "home" }
+    })
+    app.mockInput.pressKey("HOME")
+    expect(input.cursorOffset).toBe(10)
+
+    await config.update((draft) => {
+      delete draft.keybinds
+    })
+    input.cursorOffset = 7
+    app.mockInput.pressKey("HOME")
+    expect(input.cursorOffset).toBe(0)
+    app.mockInput.typeText("X")
+    expect(input.plainText).toBe("Xaaa\nbbbccc")
+    expect(app.renderer.currentFocusedEditor).toBe(input)
+  } finally {
+    app.renderer.destroy()
+  }
+})
 
 test("legacy page key aliases compile as page keys", async () => {
   let read = () => ({ up: "", down: "" })
