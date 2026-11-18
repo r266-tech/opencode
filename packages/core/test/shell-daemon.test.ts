@@ -17,7 +17,9 @@ import { FSUtil } from "@opencode/util/fs-util"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { AppProcess } from "@opencode/util/process"
 import { hostEnvironmentLayer } from "./fixture/environment"
-import { location } from "./fixture/location"
+import { tempGlobalLayer } from "./fixture/global"
+import { location, tempLocationLayer } from "./fixture/location"
+import { disabledPersistentPtyLayer } from "./fixture/persistent-pty"
 import { daemonShells, until } from "./fixture/shell-daemon"
 import { tmpdirScoped } from "./fixture/tmpdir"
 import { binaryPath } from "@opencode/pty"
@@ -556,6 +558,46 @@ describe("Shell on the process daemon", () => {
 // Against the real opencode-pty, like server/test/persistent-pty.test.ts.
 const binary = process.env.OPENCODE_PTY_BIN ?? binaryPath
 const real = binary !== undefined && existsSync(binary) ? it.live : it.live.skip
+
+for (const backend of ["daemon", "spawner"] as const) {
+  const test = backend === "daemon" ? real : it.live
+  test(`recreates the shell output directory after it is removed (${backend})`, () =>
+    Effect.gen(function* () {
+      const shell = yield* Shell.Service
+      const global = yield* Global.Service
+      const pty = yield* PersistentPty.Service
+      const program = windows ? (Bun.which("pwsh") ?? "powershell.exe") : "/bin/sh"
+      const run = Effect.fnUntraced(function* (output: string) {
+        const info = yield* shell.create({
+          shell: program,
+          command: windows ? `[Console]::Out.Write('${output}')` : `printf '${output}'`,
+        })
+        expect(yield* shell.result(info)).toMatchObject({
+          info: { status: "exited", exit: 0 },
+          capture: { output },
+        })
+        return info
+      })
+
+      yield* run("before")
+      yield* Effect.promise(() => rm(path.join(global.data, Shell.DIRECTORY), { recursive: true }))
+      const recovered = yield* Effect.forEach(["first", "second"], run, { concurrency: 2 })
+      const processes = yield* pty.listPipes()
+      for (const info of recovered) {
+        expect(processes.some((process) => process.outputPath === info.file)).toBe(backend === "daemon")
+      }
+    }).pipe(
+      Effect.provide(
+        AppNodeBuilder.build(LayerNode.group([Shell.node, Global.node, PersistentPty.node]), [
+          Location.node.replace(tempLocationLayer),
+          Global.node.replace(tempGlobalLayer),
+          Config.node.replace(Config.testLayer()),
+          Environment.node.replace(hostEnvironmentLayer),
+          ...(backend === "spawner" ? [PersistentPty.node.replace(disabledPersistentPtyLayer)] : []),
+        ]),
+      ),
+    ))
+}
 
 describe("Shell on a real process daemon", () => {
   real(
