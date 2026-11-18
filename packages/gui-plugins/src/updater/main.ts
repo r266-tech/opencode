@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs"
+import { join } from "node:path"
 import { dialog } from "electron"
 import { Effect, Exit, Schema, Scope } from "effect"
 import { builtinMainContext } from "@opencode/plugin/gui/builtin"
@@ -10,7 +12,8 @@ const setup: Plugin.MainSetup = async (ctx) => {
   const builtin = builtinMainContext(ctx)
   const build = ctx.app
   const lifecycle = builtin.lifecycle
-  const enabled = build.packaged
+  // Packagers can omit electron-updater's feed when they manage updates themselves.
+  const enabled = build.packaged && existsSync(join(process.resourcesPath, "app-update.yml"))
   // Holds no resources, so it needs no cleanup.
   const context = logContext(ctx.log.write)
   const runPromise = Effect.runPromiseWith(context)
@@ -23,7 +26,7 @@ const setup: Plugin.MainSetup = async (ctx) => {
     from: { settings: "ready", file: "opencode.updater" },
   })
 
-  // electron-updater loads only in packaged builds, after the first window is up.
+  // Load electron-updater after the first window is up.
   const platform = enabled
     ? await import("./platform").then((module) => runPromise(module.make(build.channel)))
     : undefined
