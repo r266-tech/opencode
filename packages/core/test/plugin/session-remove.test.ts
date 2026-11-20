@@ -49,7 +49,7 @@ it.live("Promise plugins can remove sessions and their children", () =>
       id: "test.session-remove",
       async setup(ctx) {
         expect(await ctx.session.remove({ sessionID: parent.id })).toBeUndefined()
-        await expect(ctx.session.get({ sessionID: parent.id })).rejects.toThrow()
+        await expect(ctx.session.get({ sessionID: parent.id })).rejects.toThrow(`Session not found: ${parent.id}`)
         await expect(ctx.session.get({ sessionID: child.id })).rejects.toThrow()
         expect(await ctx.session.get({ sessionID: unrelated.id })).toMatchObject({ id: unrelated.id })
         await expect(ctx.session.remove({ sessionID: parent.id })).rejects.toThrow()

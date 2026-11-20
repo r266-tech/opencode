@@ -9,7 +9,11 @@ import { SessionError } from "@opencode/schema/session-error"
 
 export class NotFoundError extends Schema.TaggedError<NotFoundError>()("Session.NotFoundError", {
   sessionID: SessionSchema.ID,
-}) {}
+}) {
+  override get message() {
+    return `Session not found: ${this.sessionID}`
+  }
+}
 
 export class InvalidListCursorError extends Schema.TaggedError<InvalidListCursorError>()(
   "Session.InvalidListCursorError",
@@ -70,7 +74,11 @@ export class SyntheticConflictError extends Schema.TaggedError<SyntheticConflict
     sessionID: SessionSchema.ID,
     inputID: SessionMessage.ID,
   },
-) {}
+) {
+  override get message() {
+    return `Cannot admit synthetic input ${this.inputID} to session ${this.sessionID}: ID already in use`
+  }
+}
 
 export class AttachmentError extends Schema.TaggedError<AttachmentError>()("Session.AttachmentError", {
   uri: Schema.String,
