@@ -774,13 +774,13 @@ export function DialogSelectModel(props: { provider?: string; model?: ModelState
     dispatch({ type: "placed", attempt: effect.attempt, position: measure(effect.id) })
   }
 
-  // Placed before the flyout renders its content or position, as from the effect that follows the highlight. Once it
-  // has, before it paints, it is placed again with its real height and where it landed. Settles in one more pass.
+  // Remeasure when the row's flyout renders to account for its height and containing block.
   createEffect(() => {
-    const state = flyout()
+    const id = flyoutId()
+    const state = untrack(flyout)
 
-    if (state.status !== "open" || !state.position) return
-    dispatch({ type: "placed", attempt: state.attempt, position: measure(state.id) })
+    if (!id || state.status !== "open") return
+    dispatch({ type: "placed", attempt: state.attempt, position: measure(id) })
   })
 
   onCleanup(() => {
