@@ -554,6 +554,17 @@ const layer = Layer.effect(
       return { tracked, untracked }
     })
 
+    const trackedPaths = Effect.fnUntraced(function* (repository: Repository, files: readonly RelativePath[]) {
+      const pathspecs = files.map(literalPathspec)
+      const fits = pathspecs.reduce((length, pathspec) => length + pathspec.length + 1, 0) <= argumentBudget
+      const result = yield* repositoryOperation(
+        "list_files",
+        repository,
+        fits ? ["ls-files", "--cached", "-z", "--", ...pathspecs] : ["ls-files", "--cached", "-z"],
+      )
+      return new Set(nuls(result.text).map((file) => RelativePath.make(file)))
+    })
+
     const updateIndex = Effect.fnUntraced(function* (input: {
       repository: Repository
       changes: { tracked: readonly RelativePath[]; untracked: readonly RelativePath[] }
@@ -568,9 +579,10 @@ const layer = Layer.effect(
         input.excluded ??
         (input.ignores ? yield* ignored({ repository: input.ignores, paths: candidates }) : new Set<RelativePath>())
       const maximum = input.maximumUntrackedFileBytes
-      const skipped = maximum
+      // A file can already be in the snapshot index while still untracked in the source repository.
+      const oversized = maximum
         ? (yield* Effect.forEach(
-            input.changes.untracked.filter((item) => !excluded.has(item)),
+            (input.ignores ? candidates : input.changes.untracked).filter((item) => !excluded.has(item)),
             (item) =>
               fs.stat(path.join(input.repository.worktree, item)).pipe(
                 Effect.map((info) => (info.type === "File" && Number(info.size) > maximum ? item : undefined)),
@@ -579,10 +591,12 @@ const layer = Layer.effect(
             { concurrency: 8 },
           )).filter((item): item is RelativePath => item !== undefined)
         : []
+      const sourceTracked =
+        input.ignores && oversized.length ? yield* trackedPaths(input.ignores, oversized) : undefined
+      const skipped = oversized.filter((item) => !sourceTracked?.has(item))
       const skip = new Set(skipped)
       const added = candidates.filter((item) => !excluded.has(item) && !skip.has(item))
-      // Untracked paths are not in the index, so only tracked paths that are now ignored need removing.
-      const removed = input.changes.tracked.filter((item) => excluded.has(item))
+      const removed = input.changes.tracked.filter((item) => excluded.has(item) || skip.has(item))
       // update-index takes literal paths, so large lists avoid add's quadratic pathspec matching.
       if (removed.length)
         yield* repositoryOperation("refresh", input.repository, ["update-index", "--force-remove", "-z", "--stdin"], {
@@ -592,7 +606,7 @@ const layer = Layer.effect(
       // update-index drops a tracked file replaced by an embedded repository; a second line for the same path,
       // in the same call, records its gitlink. For a path that already is a gitlink the repeat is a no-op.
       const embedded = (yield* Effect.forEach(
-        input.changes.tracked.filter((item) => !excluded.has(item)),
+        input.changes.tracked.filter((item) => !excluded.has(item) && !skip.has(item)),
         (item) =>
           fs
             .existsSafe(path.join(input.repository.worktree, item, ".git"))
@@ -760,8 +774,8 @@ const layer = Layer.effect(
     const lastCaptures = new Map<string, { readonly fingerprint: string; readonly tree: TreeID }>()
     const preparedStores = new Set<string>()
     const pendingCaptures = new Map<string, Deferred.Deferred<TreeID, OperationError>>()
-    // Untracked files skipped for size, by path, with the stamp they had when skipped.
-    const oversizedFiles = new Map<string, Map<RelativePath, string>>()
+    // Staging an oversized file can make it eligible without changing the file.
+    const oversizedFiles = new Map<string, { sourceIndex: string | undefined; files: Map<RelativePath, string> }>()
 
     /**
      * Changes are listed against the temporary index they are written to, never the
@@ -781,7 +795,12 @@ const layer = Layer.effect(
           )
           const last = lastCaptures.get(input.repository.gitDirectory)
           const untracked = changes.flatMap((change) => change.untracked)
-          const oversized = oversizedFiles.get(input.repository.gitDirectory)
+          const sourceIndex =
+            input.ignores && input.maximumUntrackedFileBytes
+              ? yield* indexFingerprint(indexFile(input.ignores))
+              : undefined
+          const cachedOversized = oversizedFiles.get(input.repository.gitDirectory)
+          const oversized = cachedOversized?.sourceIndex === sourceIndex ? cachedOversized?.files : undefined
           const stillOversized = new Set(
             oversized
               ? (yield* Effect.forEach(
@@ -809,16 +828,16 @@ const layer = Layer.effect(
           const skipped = (yield* Effect.forEach(changes, (change) =>
             updateIndex({ ...input, changes: change, index, excluded }),
           )).flatMap((update) => update.skipped)
-          oversizedFiles.set(
-            input.repository.gitDirectory,
-            new Map(
+          oversizedFiles.set(input.repository.gitDirectory, {
+            sourceIndex,
+            files: new Map(
               (yield* Effect.forEach(
                 skipped,
                 (file) => oversizedStamp(input, file).pipe(Effect.map((value) => [file, value] as const)),
                 { concurrency: 8 },
               )).filter((entry): entry is readonly [RelativePath, string] => entry[1] !== undefined),
             ),
-          )
+          })
           return yield* writeTree(input.repository, index)
         }),
       )

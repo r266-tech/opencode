@@ -507,7 +507,7 @@ describe("Git capture", () => {
 
   it.live("skips repeat ignore checks for oversized and info/exclude-only untracked files", () =>
     Effect.gen(function* () {
-      const { root, project, capture } = yield* captureSetup
+      const { root, project, repository, capture } = yield* captureSetup
       yield* Effect.promise(async () => {
         await Bun.write(path.join(project, ".git", "info", "exclude"), "excluded.txt\n")
         await Bun.write(path.join(project, "excluded.txt"), "x\n")
@@ -517,10 +517,42 @@ describe("Git capture", () => {
       const trace = path.join(root.path, "trace")
       expect(yield* withEnv({ GIT_TRACE: trace }, () => capture({ maximumUntrackedFileBytes: 4 }))).toBe(first)
       expect((yield* traced(trace)).toSorted()).toEqual(["diff-files", "ls-files"])
-      const entries = yield* Effect.promise(() =>
-        $`git --git-dir ${root.path}/storage ls-tree --name-only ${first}`.text(),
-      )
-      expect(entries.split("\n").filter(Boolean)).toEqual(["a.txt", "b.txt"])
+      expect(yield* snapshotEntries(repository, first)).toEqual(["a.txt", "b.txt"])
+    }),
+  )
+
+  it.live("applies the size limit to files untracked by the source index", () =>
+    Effect.gen(function* () {
+      const { project, repository, capture } = yield* captureSetup
+      const captureLimited = () => capture({ maximumUntrackedFileBytes: 4 })
+      const growing = "grows[1].txt"
+      const staged = "later-staged.txt"
+      const overLimit = "over the limit\n"
+      yield* Effect.promise(async () => {
+        await Bun.write(path.join(project, growing), "four")
+        await Bun.write(path.join(project, staged), overLimit)
+      })
+      expect(yield* snapshotEntries(repository, yield* captureLimited())).toEqual(["a.txt", "b.txt", growing])
+
+      yield* Effect.promise(async () => {
+        await Bun.write(path.join(project, growing), overLimit)
+        await Bun.write(path.join(project, "a.txt"), overLimit)
+      })
+      const afterGrowth = yield* captureLimited()
+      expect(yield* snapshotEntries(repository, afterGrowth)).toEqual(["a.txt", "b.txt"])
+      expect(
+        yield* Effect.promise(() =>
+          $`git --git-dir ${repository.gitDirectory} --work-tree ${project} show ${afterGrowth}:a.txt`
+            .cwd(project)
+            .text(),
+        ),
+      ).toBe(overLimit)
+
+      yield* Effect.promise(() => $`git add -- ${staged}`.cwd(project).quiet())
+      expect(yield* snapshotEntries(repository, yield* captureLimited())).toEqual(["a.txt", "b.txt", staged])
+
+      yield* Effect.promise(() => Bun.write(path.join(project, growing), "four"))
+      expect(yield* snapshotEntries(repository, yield* captureLimited())).toEqual(["a.txt", "b.txt", growing, staged])
     }),
   )
 
@@ -578,6 +610,15 @@ const captureSetup = Effect.gen(function* () {
     service.tree.capture({ repository, scopes: [RelativePath.make(".")], ignores: source, ...options })
   return { root, project, repository, service, capture }
 })
+
+const snapshotEntries = (repository: Git.Repository, tree: Git.TreeID) =>
+  Effect.promise(async () => {
+    const { gitDirectory, worktree } = repository
+    const listing = await $`git --git-dir ${gitDirectory} --work-tree ${worktree} ls-tree -z --name-only ${tree}`
+      .cwd(worktree)
+      .text()
+    return listing.split("\0").filter(Boolean)
+  })
 
 const traced = (file: string) =>
   Effect.promise(async () =>
